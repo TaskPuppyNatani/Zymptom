@@ -5,11 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zymptom"
 version = "0.1.0"
-description = "A local-first functional journal: domain and SQLite foundation."
+description = "A local-first functional journal and daily desktop logger."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}
-dependencies = []
+dependencies = ["PySide6>=6.8,<7"]
+
+[project.scripts]
+zymptom = "zymptom.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

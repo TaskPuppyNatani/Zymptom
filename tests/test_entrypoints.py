@@ -35,7 +35,7 @@ def test_module_initializes_and_reopens_database(tmp_path):
     database_path = tmp_path / "cli.sqlite3"
     for _ in range(2):
         result = subprocess.run(
-            [sys.executable, "-m", "zymptom", "--database", str(database_path)],
+            [sys.executable, "-m", "zymptom", "--init-db", "--database", str(database_path)],
             check=True, capture_output=True, text=True,
         )
         assert "schema version 1" in result.stdout

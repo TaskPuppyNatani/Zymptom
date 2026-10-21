@@ -4,14 +4,16 @@ Zymptom is a local-first functional journal. Its atomic record is a
 `FunctionalEpisode`: one real-world attempt to perform an activity, including
 duration, difficulties, adaptations, help, outcome, recovery, and ability to resume.
 
-This repository implements **Z0 — Foundation only**. It contains a Python domain
-model, a SQLite repository, explicit numbered migrations, a small application
-service, and pytest coverage. There is no GUI or UI framework dependency, and no
-AI, accounts, cloud, synchronization, reporting, or health integrations.
+This repository implements **Z1 — First Usable Logger**, on the existing Z0
+foundation. The PySide6 desktop app opens on Today and lets you record, reopen,
+and edit functional attempts. The domain, SQLite persistence, and services remain
+independent of Qt. History navigation and other Z2/Z3 features are not included.
 
 ## Install and test
 
-Requires Python 3.12 or newer. Runtime dependencies are entirely standard library.
+Requires Python 3.12 or newer and PySide6. Domain and persistence use only the
+standard library. On Linux, a desktop Qt platform plugin and its system libraries
+are needed; see the [Qt for Python installation guide](https://doc.qt.io/qtforpython-6/gettingstarted.html).
 
 ```bash
 python3 -m venv .venv
@@ -20,14 +22,64 @@ python -m pip install -e '.[dev]'
 python -m pytest
 ```
 
-Initialize or reopen a database (pending migrations apply automatically):
+Launch the app:
+
+```bash
+zymptom
+# Or: python -m zymptom
+```
+
+The default journal lives in Qt's per-user application-data directory (on Linux,
+normally `~/.local/share/Zymptom/Zymptom/zymptom.sqlite3`). The app creates that
+directory and applies pending migrations automatically. To use an existing or
+specific journal:
 
 ```bash
 python -m zymptom --database ./zymptom.sqlite3
 ```
 
-The command creates a database at the chosen path; its parent directory must
-already exist. The library also supports `:memory:` for ephemeral databases.
+An explicitly selected path must have an existing parent directory. Z0 database
+initialization remains available without launching Qt:
+
+```bash
+python -m zymptom --init-db --database ./zymptom.sqlite3
+```
+
+## Daily logging
+
+Today shows only the current local calendar day, oldest first. Click **+ Log
+Something** (or Ctrl+N), enter what you attempted, choose an outcome, and Save.
+Time defaults to now. Duration, quick adaptations/needs, and recovery duration
+are optional. A basic entry does not require expanding More details.
+
+**More details** exposes functional demands, symptoms and symptom notes, all
+adaptations, help and help notes, consequences, recovery actions, recovery-required
+status, resume ability, and notes. Tag controls offer common suggestions or accept
+free text. Choose/type a value and click Add; Remove selected deletes a chosen
+tag. Existing custom values, duplicates, and order are retained.
+
+Quick choices share those tag collections: changed position, sat down, took break,
+and needed help are adaptations; lay down, medication, and sensory recovery are
+recovery actions. Medication is simply an action tag. Quick choices do not infer
+a help level or recovery-required status; those remain optional detail fields.
+
+Click a Today entry, or select it and press Enter, to edit it. Save refreshes Today
+immediately. An entry moved to another local day leaves Today. Cancel or Escape
+discards only the draft. Failed saves keep the form open for retry or cancellation.
+Ctrl+S saves explicitly; Enter in a field does not submit the form. Controls use
+the system font, accessible names, a logical Tab order, and visible checked states.
+
+Displayed dates/times use the system timezone; persistence stays UTC-aware.
+Unchanged timestamps retain their original microseconds and daylight-saving-time
+instant. Changed timestamps use the local date/time control's timezone and Qt's
+millisecond precision. Today refreshes periodically to handle local-day rollover.
+
+UI integration tests use Qt's offscreen platform by default and QtTest, with the
+same pytest fixtures and real temporary databases as the foundation tests:
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ui
+```
 
 ## Use the repository
 
@@ -115,10 +167,12 @@ src/zymptom/
     domain/        # Dataclass, enums, validation, timestamp conversion
     persistence/   # SQLite connection, migrations, atomic CRUD
     services/      # Small application-facing episode service
+    ui/            # Today, editor, Qt controls, local-time boundary, app lifetime
 tests/
     domain/
     persistence/
+    ui/
 ```
 
-Z0 stores data in a local SQLite file. Encryption and backup management are not
-implemented in this foundation. Licensed under MIT; see `LICENSE`.
+The journal is stored in a local SQLite file. Encryption and backup management
+are not implemented. Licensed under MIT; see `LICENSE`.

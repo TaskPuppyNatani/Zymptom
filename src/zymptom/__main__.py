@@ -1,4 +1,4 @@
-"""Minimal database initialization command; Z0 has no GUI."""
+"""Launch the logger, or explicitly initialize a database without a GUI."""
 
 import argparse
 from contextlib import closing
@@ -10,14 +10,21 @@ from zymptom.persistence.migrations import schema_version
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Initialize or migrate a local Zymptom database.")
+    parser = argparse.ArgumentParser(description="Zymptom — a local functional journal.")
     parser.add_argument("--version", action="version", version=f"Zymptom {__version__}")
-    parser.add_argument("--database", type=Path, default=Path("zymptom.sqlite3"))
+    parser.add_argument("--database", type=Path, help="Use a particular local SQLite file.")
+    parser.add_argument("--init-db", action="store_true", help="Initialize/migrate and exit without opening the app.")
     args = parser.parse_args(argv)
-    with closing(connect_database(args.database)) as connection:
-        version = schema_version(connection)
-    print(f"Database ready: {args.database} (schema version {version})")
-    return 0
+    if args.init_db:
+        path = args.database or Path("zymptom.sqlite3")
+        with closing(connect_database(path)) as connection:
+            version = schema_version(connection)
+        print(f"Database ready: {path} (schema version {version})")
+        return 0
+
+    from zymptom.ui.app import run
+
+    return run(args.database)
 
 
 if __name__ == "__main__":
