@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from zymptom.services import EpisodeService
 from zymptom.ui.editor import EpisodeEditor
 from zymptom.ui.window import MainWindow
+from zymptom.ui.theme import apply_theme
 
 NOW = datetime(2026, 10, 21, 21, 10, tzinfo=UTC)
 
@@ -18,6 +19,7 @@ NOW = datetime(2026, 10, 21, 21, 10, tzinfo=UTC)
 def qapp():
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
+    apply_theme(app)
     yield app
 
 

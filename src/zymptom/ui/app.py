@@ -12,12 +12,16 @@ from zymptom.persistence import EpisodeRepository, connect_database
 from zymptom.services import EpisodeService
 
 from .window import MainWindow
+from .branding import application_icon
+from .theme import apply_theme
 
 
 def run(database: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setOrganizationName("Zymptom")
     app.setApplicationName("Zymptom")
+    apply_theme(app)
+    app.setWindowIcon(application_icon())
     try:
         if database is None:
             directory = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from zymptom.services import EpisodeService
 
 from .editor import EpisodeEditor
+from .branding import application_icon, brand_mark
 from .labels import OUTCOMES
 from .time import to_local
 from .widgets import comfortable
@@ -26,6 +27,7 @@ class MainWindow(QMainWindow):
         self.now = now or (lambda: datetime.now(UTC))
         self.editor = None
         self.setWindowTitle("Zymptom — Today")
+        self.setWindowIcon(application_icon())
         self.resize(640, 640)
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -37,20 +39,25 @@ class MainWindow(QMainWindow):
         self.heading.setFont(heading_font)
         layout.addWidget(self.heading)
         self.day_label = QLabel()
+        self.day_label.setProperty("tone", "secondary")
         layout.addWidget(self.day_label)
         self.log_button = QPushButton("+ Log Something")
+        self.log_button.setProperty("primary", True)
         comfortable(self.log_button, "Log something")
         self.log_button.setToolTip("Log an attempt (Ctrl+N)")
         layout.addWidget(self.log_button)
         self.empty_label = QLabel("No entries today. Start with something you tried to do.")
         self.empty_label.setWordWrap(True)
+        self.empty_label.setProperty("tone", "secondary")
         layout.addWidget(self.empty_label)
         self.entries = QListWidget()
+        self.entries.setObjectName("episodes")
         self.entries.setAccessibleName("Today's episodes. Select an entry to edit it.")
         self.entries.setWordWrap(True)
         self.entries.setSpacing(6)
         layout.addWidget(self.entries, 1)
         self.error = QLabel()
+        self.error.setProperty("role", "error")
         self.error.setAccessibleName("Today error")
         self.error.setWordWrap(True)
         self.error.hide()
@@ -59,6 +66,8 @@ class MainWindow(QMainWindow):
         comfortable(self.retry_button, "Retry loading Today")
         self.retry_button.hide()
         layout.addWidget(self.retry_button)
+        self.branding = brand_mark(content)
+        layout.addWidget(self.branding)
         self.setCentralWidget(content)
         self.log_button.clicked.connect(self.new_episode)
         self.entries.itemClicked.connect(self.open_episode)

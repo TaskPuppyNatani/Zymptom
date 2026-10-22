@@ -41,6 +41,7 @@ class EpisodeEditor(QDialog):
         content = QWidget()
         body = QVBoxLayout(content)
         intro = QLabel("Record an attempt, even if you stopped or couldn't start.")
+        intro.setProperty("tone", "secondary")
         intro.setWordWrap(True)
         body.addWidget(intro)
         common = QFormLayout()
@@ -132,6 +133,7 @@ class EpisodeEditor(QDialog):
         layout.addWidget(scroll, 1)
 
         self.error = QLabel()
+        self.error.setProperty("role", "error")
         self.error.setWordWrap(True)
         self.error.setAccessibleName("Save error")
         self.error.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -140,6 +142,7 @@ class EpisodeEditor(QDialog):
         actions = QHBoxLayout()
         self.cancel_button = QPushButton("&Cancel")
         self.save_button = QPushButton("&Save")
+        self.save_button.setProperty("primary", True)
         comfortable(self.cancel_button, "Cancel")
         comfortable(self.save_button, "Save")
         self.save_button.setToolTip("Save this entry (Ctrl+S)")
