@@ -4,10 +4,11 @@ Zymptom is a local-first functional journal. Its atomic record is a
 `FunctionalEpisode`: one real-world attempt to perform an activity, including
 duration, difficulties, adaptations, help, outcome, recovery, and ability to resume.
 
-This repository implements **Z1 — First Usable Logger**, on the existing Z0
-foundation. The PySide6 desktop app opens on Today and lets you record, reopen,
-and edit functional attempts. The domain, SQLite persistence, and services remain
-independent of Qt. History navigation and other Z2/Z3 features are not included.
+This repository implements **Z2 — History / Timeline + Search**, on the existing
+logger foundation. The PySide6 desktop app opens on Today and lets you record,
+reopen, edit, and find functional attempts. The domain, SQLite persistence, and
+services remain independent of Qt. Exports, summaries, and other Z3 features are
+not included.
 
 ## Install and test
 
@@ -80,6 +81,27 @@ same pytest fixtures and real temporary databases as the foundation tests:
 ```bash
 QT_QPA_PLATFORM=offscreen python -m pytest tests/ui
 ```
+
+## History and search
+
+Choose **History** beside Today to review persisted episodes, newest first,
+grouped by local calendar date. Click an episode or select it and press Enter to
+open the same editor used by Today. Saving refreshes both views and retains the
+active History filters. An entry that no longer matches those filters disappears
+from the results.
+
+Search matches activity text only, using a case-insensitive literal substring
+(including Unicode). Blank search applies no activity restriction. Outcome and
+functional-demand filters combine with search and dates using AND. Demand choices
+come from actual stored tag values, including custom values; matching uses the
+exact tag, rather than its display label.
+
+Enable **From** and/or **Through** to apply an inclusive local date range. The date
+fields initially offer the last 30 calendar days, but are inactive until checked.
+Use **Clear filters** to return to all entries. Local calendar bounds convert to
+UTC at the UI boundary and account for 23- and 25-hour daylight-saving days;
+timestamp storage is unchanged. History queries use the existing SQLite schema,
+so this release requires no new migration.
 
 ## Use the repository
 

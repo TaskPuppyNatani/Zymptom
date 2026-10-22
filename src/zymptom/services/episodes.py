@@ -1,5 +1,8 @@
 """Small application-facing API without UI or framework dependencies."""
 
+from __future__ import annotations
+
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -30,3 +33,17 @@ class EpisodeService:
 
     def list(self) -> list[FunctionalEpisode]:
         return self.repository.list()
+
+    def search(
+        self, *, activity: str = "", outcome: EpisodeOutcome | None = None,
+        functional_demand: str | None = None, occurred_from: datetime | None = None,
+        occurred_before: datetime | None = None,
+    ) -> list[FunctionalEpisode]:
+        """Query history with composable filters, in newest-first order."""
+        return self.repository.search(
+            activity=activity, outcome=outcome, functional_demand=functional_demand,
+            occurred_from=occurred_from, occurred_before=occurred_before,
+        )
+
+    def functional_demands(self) -> list[str]:
+        return self.repository.functional_demands()

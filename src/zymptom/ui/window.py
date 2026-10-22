@@ -1,4 +1,4 @@
-"""Today's local calendar day, with one action for logging an attempt."""
+"""Today and History, sharing the existing episode editor."""
 
 import sqlite3
 from datetime import UTC, datetime
@@ -6,13 +6,14 @@ from datetime import UTC, datetime
 from PySide6.QtCore import QTimeZone, QTimer, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QLabel, QListWidget, QListWidgetItem, QMainWindow, QPushButton,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from zymptom.services import EpisodeService
 
 from .editor import EpisodeEditor
+from .history import HistoryView
 from .branding import application_icon, brand_mark
 from .labels import OUTCOMES
 from .time import to_local
@@ -41,31 +42,50 @@ class MainWindow(QMainWindow):
         self.day_label = QLabel()
         self.day_label.setProperty("tone", "secondary")
         layout.addWidget(self.day_label)
+        navigation = QHBoxLayout()
+        self.today_button = QPushButton("Today")
+        self.history_button = QPushButton("History")
+        self.navigation_group = QButtonGroup(self)
+        for button in (self.today_button, self.history_button):
+            comfortable(button, f"Show {button.text()}")
+            button.setCheckable(True)
+            self.navigation_group.addButton(button)
+            navigation.addWidget(button)
+        self.today_button.setChecked(True)
+        layout.addLayout(navigation)
         self.log_button = QPushButton("+ Log Something")
         self.log_button.setProperty("primary", True)
         comfortable(self.log_button, "Log something")
         self.log_button.setToolTip("Log an attempt (Ctrl+N)")
         layout.addWidget(self.log_button)
+        self.pages = QStackedWidget()
+        self.today_page = QWidget()
+        today_layout = QVBoxLayout(self.today_page)
+        today_layout.setContentsMargins(0, 0, 0, 0)
         self.empty_label = QLabel("No entries today. Start with something you tried to do.")
         self.empty_label.setWordWrap(True)
         self.empty_label.setProperty("tone", "secondary")
-        layout.addWidget(self.empty_label)
+        today_layout.addWidget(self.empty_label)
         self.entries = QListWidget()
         self.entries.setObjectName("episodes")
         self.entries.setAccessibleName("Today's episodes. Select an entry to edit it.")
         self.entries.setWordWrap(True)
         self.entries.setSpacing(6)
-        layout.addWidget(self.entries, 1)
+        today_layout.addWidget(self.entries, 1)
         self.error = QLabel()
         self.error.setProperty("role", "error")
         self.error.setAccessibleName("Today error")
         self.error.setWordWrap(True)
         self.error.hide()
-        layout.addWidget(self.error)
+        today_layout.addWidget(self.error)
         self.retry_button = QPushButton("Retry loading Today")
         comfortable(self.retry_button, "Retry loading Today")
         self.retry_button.hide()
-        layout.addWidget(self.retry_button)
+        today_layout.addWidget(self.retry_button)
+        self.pages.addWidget(self.today_page)
+        self.history = HistoryView(service, zone=self.zone, now=lambda: self.now(), parent=self)
+        self.pages.addWidget(self.history)
+        layout.addWidget(self.pages, 1)
         self.branding = brand_mark(content)
         layout.addWidget(self.branding)
         self.setCentralWidget(content)
@@ -73,6 +93,9 @@ class MainWindow(QMainWindow):
         self.entries.itemClicked.connect(self.open_episode)
         self.entries.itemActivated.connect(self.open_episode)
         self.retry_button.clicked.connect(self.refresh)
+        self.today_button.clicked.connect(self.show_today)
+        self.history_button.clicked.connect(self.show_history)
+        self.history.episode_activated.connect(self.open_episode_id)
         self.new_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         self.new_shortcut.activated.connect(self.new_episode)
         self.day_timer = QTimer(self)
@@ -123,16 +146,46 @@ class MainWindow(QMainWindow):
         self._open_editor()
 
     def open_episode(self, item):
+        self.open_episode_id(item.data(Qt.ItemDataRole.UserRole))
+
+    def open_episode_id(self, episode_id):
         try:
-            episode = self.service.get(item.data(Qt.ItemDataRole.UserRole))
+            episode = self.service.get(episode_id)
         except (sqlite3.Error, OSError, ValueError):
-            self._load_error("Could not open this entry. Please retry.")
+            self._open_error("Could not open this entry. Please retry.")
             return
         if episode is None:
-            self.refresh()
-            self._load_error("This entry is no longer available. Today has been refreshed.")
+            self._refresh_views()
+            self._open_error("This entry is no longer available. Entries have been refreshed.")
             return
         self._open_editor(episode)
+
+    def _open_error(self, message):
+        if self.pages.currentWidget() is self.history:
+            self.history.show_error(message)
+        else:
+            self._load_error(message)
+
+    def _refresh_views(self):
+        self.refresh()
+        if self.pages.currentWidget() is self.history:
+            self.history.refresh()
+
+    def show_today(self):
+        self.pages.setCurrentWidget(self.today_page)
+        self.today_button.setChecked(True)
+        self.heading.setText("Today")
+        self.day_label.show()
+        self.setWindowTitle("Zymptom — Today")
+        self.refresh()
+
+    def show_history(self):
+        self.pages.setCurrentWidget(self.history)
+        self.history_button.setChecked(True)
+        self.heading.setText("History")
+        self.day_label.hide()
+        self.setWindowTitle("Zymptom — History")
+        self.history.refresh()
 
     def _open_editor(self, episode=None):
         if self.editor is not None:
@@ -141,7 +194,7 @@ class MainWindow(QMainWindow):
             return
         editor = EpisodeEditor(self.service, episode, zone=self.zone, now=self.now(), parent=self)
         self.editor = editor
-        editor.accepted.connect(self.refresh)
+        editor.accepted.connect(self._refresh_views)
         editor.finished.connect(self._editor_finished)
         editor.finished.connect(editor.deleteLater)
         editor.open()

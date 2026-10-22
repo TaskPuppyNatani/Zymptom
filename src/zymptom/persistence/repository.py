@@ -1,11 +1,14 @@
 """Complete FunctionalEpisode CRUD, including ordered child collections."""
 
+from __future__ import annotations
+
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Iterator
 from uuid import UUID
 
+from zymptom.domain.enums import EpisodeOutcome
 from zymptom.domain.models import FunctionalEpisode
 from zymptom.domain.validation import (
     deserialize_timestamp,
@@ -43,6 +46,7 @@ class EpisodeRepository:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
+        connection.create_function("zymptom_casefold", 1, str.casefold, deterministic=True)
 
     def create(self, episode: FunctionalEpisode) -> FunctionalEpisode:
         validate_episode(episode)
@@ -104,6 +108,53 @@ class EpisodeRepository:
         with self._read_snapshot():
             rows = self.connection.execute("SELECT * FROM episodes ORDER BY occurred_at ASC, id ASC").fetchall()
             return [self._load(row) for row in rows]
+
+    def search(
+        self, *, activity: str = "", outcome: EpisodeOutcome | None = None,
+        functional_demand: str | None = None, occurred_from: datetime | None = None,
+        occurred_before: datetime | None = None,
+    ) -> list[FunctionalEpisode]:
+        """Find episodes newest first. Time bounds are inclusive/exclusive UTC.
+
+        Activity is a literal, Unicode-case-insensitive substring. Demands match
+        exact stored tags; EXISTS avoids duplicate episodes for duplicate tags.
+        """
+        clauses = []
+        parameters = []
+        if activity.strip():
+            clauses.append("instr(zymptom_casefold(episodes.activity), ?) > 0")
+            parameters.append(activity.strip().casefold())
+        if outcome is not None:
+            clauses.append("episodes.outcome = ?")
+            parameters.append(EpisodeOutcome(outcome).value)
+        if functional_demand is not None:
+            clauses.append("""EXISTS (
+                SELECT 1 FROM episode_functional_demands AS demands
+                WHERE demands.episode_id = episodes.id AND demands.tag = ?
+            )""")
+            parameters.append(functional_demand)
+        start = serialize_timestamp(occurred_from) if occurred_from is not None else None
+        end = serialize_timestamp(occurred_before) if occurred_before is not None else None
+        if start is not None and end is not None and start >= end:
+            raise ValueError("The start must be earlier than the exclusive end.")
+        if start is not None:
+            clauses.append("episodes.occurred_at >= ?")
+            parameters.append(start)
+        if end is not None:
+            clauses.append("episodes.occurred_at < ?")
+            parameters.append(end)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._read_snapshot():
+            rows = self.connection.execute(
+                f"SELECT episodes.* FROM episodes {where} ORDER BY occurred_at DESC, id DESC",
+                parameters,
+            ).fetchall()
+            return [self._load(row) for row in rows]
+
+    def functional_demands(self) -> list[str]:
+        """Return distinct persisted demand values for the filter choices."""
+        rows = self.connection.execute("SELECT DISTINCT tag FROM episode_functional_demands").fetchall()
+        return sorted((row[0] for row in rows), key=lambda value: (value.casefold(), value))
 
     def _insert_tags(self, episode: FunctionalEpisode) -> None:
         for field, table in TAG_TABLES.items():

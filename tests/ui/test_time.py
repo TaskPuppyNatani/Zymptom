@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
 import pytest
-from PySide6.QtCore import QDateTime, QTime
+from PySide6.QtCore import QDate, QDateTime, QTime
 
 from zymptom.domain import EpisodeOutcome, FunctionalEpisode
-from zymptom.ui.time import to_local, to_utc
+from zymptom.ui.time import local_date_bounds, to_local, to_utc
 
 
 @pytest.mark.parametrize("instant,display,offset", [
@@ -49,3 +49,16 @@ def test_changing_local_time_saves_the_correct_aware_utc_instant(make_editor, se
 def test_invalid_time_is_rejected():
     with pytest.raises(ValueError, match="valid date and time"):
         to_utc(QDateTime())
+
+
+@pytest.mark.parametrize("day,start,end,hours", [
+    (QDate(2026, 3, 8), datetime(2026, 3, 8, 8, tzinfo=UTC), datetime(2026, 3, 9, 7, tzinfo=UTC), 23),
+    (QDate(2026, 11, 1), datetime(2026, 11, 1, 7, tzinfo=UTC), datetime(2026, 11, 2, 8, tzinfo=UTC), 25),
+    (QDate(2026, 10, 21), datetime(2026, 10, 21, 7, tzinfo=UTC), datetime(2026, 10, 22, 7, tzinfo=UTC), 24),
+])
+def test_local_date_range_uses_calendar_days_across_dst(zone, day, start, end, hours):
+    assert local_date_bounds(day, day, zone) == (start, end)
+    assert (end - start).total_seconds() == hours * 3600
+    assert local_date_bounds(day, None, zone) == (start, None)
+    assert local_date_bounds(None, day, zone) == (None, end)
+    assert local_date_bounds(None, None, zone) == (None, None)
