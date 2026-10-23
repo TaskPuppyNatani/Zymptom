@@ -4,11 +4,10 @@ Zymptom is a local-first functional journal. Its atomic record is a
 `FunctionalEpisode`: one real-world attempt to perform an activity, including
 duration, difficulties, adaptations, help, outcome, recovery, and ability to resume.
 
-This repository implements **Z2.3 — Delete Functional Episodes**, on the existing
-logger and history foundation. The PySide6 desktop app opens on Today and lets you record,
-reopen, edit, and find functional attempts. The domain, SQLite persistence, and
-services remain independent of Qt. Exports, summaries, and other Z3 features are
-not included.
+The PySide6 desktop app opens on Today and lets you record, reopen, edit, and
+find functional attempts. It supports local voice dictation and JSON, CSV, and
+human-readable Markdown exports. The domain, SQLite persistence, and services
+remain independent of Qt.
 
 ## Install and test
 
@@ -29,6 +28,23 @@ Launch the app:
 zymptom
 # Or: python -m zymptom
 ```
+
+To launch from the Linux application menu without activating the virtual
+environment or changing directories, install the user-level desktop entry after
+installing the project dependencies:
+
+```bash
+./scripts/install-desktop.sh
+```
+
+The installer targets this checkout's `.venv`, uses the packaged Zymptom
+branding, and works without root access. It also saves the current Whisper
+environment variables when present. Otherwise, on first setup, it detects the
+common `~/Projects/whisper.cpp` executable and `ggml-small.en.bin` model paths
+when both files exist. After `git pull` and any needed dependency updates, the
+same application-menu entry launches the updated checkout. Remove the launcher
+with `./scripts/uninstall-desktop.sh`; this leaves dictation settings and the
+journal database untouched.
 
 The default journal lives in Qt's per-user application-data directory (on Linux,
 normally `~/.local/share/Zymptom/Zymptom/zymptom.sqlite3`). The app creates that
@@ -108,22 +124,26 @@ the dialog discards dictation and leaves the destination unchanged.
 
 Dictation uses Qt Multimedia's default desktop microphone and a separately
 installed local [whisper.cpp CLI](https://github.com/ggml-org/whisper.cpp/tree/master/examples/cli).
-Provide an existing whisper.cpp-compatible model file; Zymptom does not install
-engines, download models, or use cloud transcription. Configure the process
-environment before launching, for example:
+Provide an existing whisper.cpp-compatible executable and model file; Zymptom
+does not install engines, download models, or use cloud transcription. The
+desktop installer detects the common local `~/Projects/whisper.cpp` paths above.
+For a different setup, save settings in `~/.config/zymptom/config.json` (or
+`$XDG_CONFIG_HOME/zymptom/config.json`):
 
-```bash
-export ZYMPTOM_WHISPER_MODEL="/absolute/path/to/ggml-base.en.bin"
-# Optional if whisper-cli is already on PATH:
-export ZYMPTOM_WHISPER_COMMAND="/absolute/path/to/whisper-cli"
-zymptom
+```json
+{
+  "whisper_command": "/absolute/path/to/whisper-cli",
+  "whisper_model": "/absolute/path/to/ggml-base.en.bin"
+}
 ```
 
-`ZYMPTOM_WHISPER_COMMAND` is one trusted local whisper.cpp-compatible executable
-path or command name, without shell syntax or extra arguments. The adapter
-passes the local model and WAV paths directly to that process and requests a
-UTF-8 text file. Other speech engines can implement the small `AudioCapture` /
-`LocalTranscriber` ports without changing the editor or episode schema.
+`ZYMPTOM_WHISPER_COMMAND` and `ZYMPTOM_WHISPER_MODEL` remain available and
+override their saved values for development or testing. The command is one
+trusted local whisper.cpp-compatible executable path or command name, without
+shell syntax or extra arguments. The adapter passes local model and WAV paths
+directly to that process and requests a UTF-8 text file. Other speech engines
+can implement the small `AudioCapture` / `LocalTranscriber` ports without
+changing the editor or episode schema.
 
 Linux is the primary capture platform. Qt Multimedia needs a working system
 audio service, a default microphone, and input permission. The device must support

@@ -1,21 +1,26 @@
 """Local whisper.cpp CLI adapter. No shell, HTTP client, or model downloads."""
 
-import os
 import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QTimer
 
+from .config import configuration_path, load_whisper_configuration
 from .contracts import LocalTranscriber
 
 
 class WhisperCppTranscriber(LocalTranscriber):
     def __init__(self, parent=None):
         super().__init__(parent)
-        command = os.environ.get("ZYMPTOM_WHISPER_COMMAND", "whisper-cli")
-        self.command = shutil.which(command)
-        model = os.environ.get("ZYMPTOM_WHISPER_MODEL", "")
-        self.model = Path(model).expanduser().resolve() if model else None
+        command, model = load_whisper_configuration()
+        try:
+            self.command = shutil.which(command) if command else None
+        except (OSError, ValueError):
+            self.command = None
+        try:
+            self.model = Path(model).expanduser().resolve() if model else None
+        except (OSError, RuntimeError, ValueError):
+            self.model = None
         self._process = None
         self._output = None
         self._timeout = QTimer(self)
@@ -27,8 +32,9 @@ class WhisperCppTranscriber(LocalTranscriber):
         if not self.command or not self.model or not self.model.is_file():
             return (
                 "Local speech transcription is unavailable. Install whisper.cpp's whisper-cli "
-                "and set ZYMPTOM_WHISPER_MODEL to an existing local model file. "
-                "ZYMPTOM_WHISPER_COMMAND may select the executable. Nothing is downloaded."
+                f"and configure an existing model in {configuration_path()} or set "
+                "ZYMPTOM_WHISPER_MODEL. ZYMPTOM_WHISPER_COMMAND may select the executable. "
+                "Nothing is downloaded."
             )
         return None
 
