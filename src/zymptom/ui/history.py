@@ -5,7 +5,7 @@ import sqlite3
 from PySide6.QtCore import QTimeZone, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
 from zymptom.services import EpisodeService
@@ -17,6 +17,7 @@ from .widgets import comfortable
 
 class HistoryView(QWidget):
     episode_activated = Signal(str)
+    episode_delete_requested = Signal(str)
 
     def __init__(self, service: EpisodeService, *, zone: QTimeZone, now, parent=None):
         super().__init__(parent)
@@ -67,6 +68,7 @@ class HistoryView(QWidget):
         self.entries.setWordWrap(True)
         self.entries.setSpacing(6)
         self.entries.setAccessibleName("History episodes, newest first, grouped by local date")
+        self.entries.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         layout.addWidget(self.entries, 1)
         self.error = QLabel()
         self.error.setProperty("role", "error")
@@ -92,6 +94,7 @@ class HistoryView(QWidget):
         self.retry_button.clicked.connect(self.refresh)
         self.entries.itemClicked.connect(self._activate)
         self.entries.itemActivated.connect(self._activate)
+        self.entries.customContextMenuRequested.connect(self._show_episode_context_menu)
 
     @staticmethod
     def _row(form, label, widget):
@@ -207,6 +210,27 @@ class HistoryView(QWidget):
         episode_id = item.data(Qt.ItemDataRole.UserRole)
         if episode_id is not None:
             self.episode_activated.emit(episode_id)
+
+    def _show_episode_context_menu(self, position):
+        item = self.entries.itemAt(position)
+        episode_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if episode_id is None:
+            return
+
+        self.entries.setCurrentItem(item)
+        menu = QMenu(self.entries)
+        edit_action = menu.addAction("Edit")
+        delete_action = menu.addAction("Delete…")
+        edit_action.triggered.connect(
+            lambda checked=False, target_id=episode_id: self.episode_activated.emit(target_id)
+        )
+        delete_action.triggered.connect(
+            lambda checked=False, target_id=episode_id: self.episode_delete_requested.emit(target_id)
+        )
+        try:
+            menu.exec(self.entries.mapToGlobal(position))
+        finally:
+            menu.deleteLater()
 
     def show_error(self, message, *, retry=True):
         self.error.setText(message)

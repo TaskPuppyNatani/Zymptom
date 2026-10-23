@@ -2,8 +2,10 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QTimer, Qt
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QMenu, QMessageBox
 
 from zymptom.domain import EpisodeOutcome
 from zymptom.ui.editor import EpisodeEditor
@@ -39,7 +41,13 @@ def result_items(history):
 
 
 def result_ids(history):
-    return [item.data(Qt.ItemDataRole.UserRole) for item in result_items(history)]
+    return visible_ids(history.entries)
+
+
+def visible_ids(entries):
+    return [entries.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(entries.count())
+            if entries.item(index).data(Qt.ItemDataRole.UserRole) is not None]
 
 
 def select(combo, value):
@@ -56,6 +64,34 @@ def open_result(window, qapp, index=0):
     qapp.processEvents()
     assert isinstance(window.editor, EpisodeEditor)
     return window.editor
+
+
+def choose_context_action(history, item, qapp, label):
+    result = {}
+
+    def choose():
+        try:
+            menu = qapp.activePopupWidget()
+            assert isinstance(menu, QMenu)
+            result["labels"] = [action.text() for action in menu.actions()]
+            action = next(action for action in menu.actions() if action.text() == label)
+            action.trigger()
+        except Exception as exc:
+            result["error"] = exc
+
+    QTimer.singleShot(0, choose)
+    rect = history.entries.visualItemRect(item)
+    viewport = history.entries.viewport()
+    point = rect.center()
+    QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=point)
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, point, viewport.mapToGlobal(point), Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(viewport, event)
+    qapp.processEvents()
+    if "error" in result:
+        raise result["error"]
+    assert result["labels"] == ["Edit", "Delete…"]
 
 
 def test_history_reachable_loads_newest_first_and_groups_by_local_day(window, qapp, history_records):
@@ -235,6 +271,117 @@ def test_history_keyboard_activation_skips_date_headers(window, qapp, history_re
     QTest.keyClick(history.entries, Qt.Key.Key_Return)
     qapp.processEvents()
     assert window.editor is not None
+
+
+def test_history_context_menu_edits_the_episode_under_the_cursor(window, qapp, history_records):
+    history = open_history(window, qapp)
+    target_id = str(history_records[1].id)
+    item = next(item for item in result_items(history) if item.data(Qt.ItemDataRole.UserRole) == target_id)
+
+    choose_context_action(history, item, qapp, "Edit")
+
+    assert isinstance(window.editor, EpisodeEditor)
+    assert window.editor.original.id == history_records[1].id
+    window.editor.cancel_button.click()
+
+
+def test_history_context_delete_reuses_confirmation_and_cancel_is_non_destructive(
+    window, qapp, service, history_records,
+):
+    history = open_history(window, qapp)
+    target_id = str(history_records[0].id)
+    item = next(item for item in result_items(history) if item.data(Qt.ItemDataRole.UserRole) == target_id)
+
+    choose_context_action(history, item, qapp, "Delete…")
+
+    editor = window.editor
+    assert isinstance(editor, EpisodeEditor)
+    assert editor.original.id == history_records[0].id
+    confirmation = editor.delete_confirmation
+    assert confirmation is not None and confirmation.isVisible()
+    assert history_records[0].activity in confirmation.informativeText()
+    assert "This cannot be undone" in confirmation.informativeText()
+    confirmation.button(QMessageBox.StandardButton.Cancel).click()
+    qapp.processEvents()
+    assert window.editor is editor and editor.isVisible()
+    assert service.get(history_records[0].id) == history_records[0]
+    assert str(history_records[0].id) in result_ids(history)
+    editor.cancel_button.click()
+
+
+def test_history_context_delete_refreshes_both_views_and_preserves_filters(
+    window, qapp, service, history_records, monkeypatch,
+):
+    target = history_records[1]
+    survivor = service.record(
+        activity="Homework survivor", outcome=target.outcome, occurred_at=window.now(),
+        functional_demands=["sitting"],
+    )
+    window.refresh()
+    history = open_history(window, qapp)
+    history.search_text.setText("Homework")
+    select(history.outcome, target.outcome)
+    select(history.demand, "sitting")
+    local_day = to_local(target.occurred_at, window.zone).date()
+    history.start_date.setDate(local_day)
+    history.end_date.setDate(local_day)
+    history.start_enabled.setChecked(True)
+    history.end_enabled.setChecked(True)
+    assert set(result_ids(history)) == {str(target.id), str(survivor.id)}
+    before_today_ids = set(visible_ids(window.entries))
+    assert {str(target.id), str(survivor.id)} <= before_today_ids
+    before_filters = (
+        history.search_text.text(), history.outcome.currentData(), history.demand.currentData(),
+        history.start_enabled.isChecked(), history.end_enabled.isChecked(),
+        history.start_date.date(), history.end_date.date(),
+    )
+    calls = []
+    actual_delete = service.delete
+
+    def observed_delete(episode_id):
+        calls.append(episode_id)
+        return actual_delete(episode_id)
+
+    monkeypatch.setattr(service, "delete", observed_delete)
+    item = next(item for item in result_items(history) if item.data(Qt.ItemDataRole.UserRole) == str(target.id))
+    choose_context_action(history, item, qapp, "Delete…")
+    confirmation = window.editor.delete_confirmation
+    delete_button = next(
+        button for button in confirmation.buttons()
+        if confirmation.buttonRole(button) == QMessageBox.ButtonRole.DestructiveRole
+    )
+    delete_button.click()
+    qapp.processEvents()
+
+    assert calls == [target.id]
+    assert service.get(target.id) is None
+    assert service.get(survivor.id) == survivor
+    assert result_ids(history) == [str(survivor.id)]
+    assert set(visible_ids(window.entries)) == before_today_ids - {str(target.id)}
+    assert str(survivor.id) in visible_ids(window.entries)
+    assert (
+        history.search_text.text(), history.outcome.currentData(), history.demand.currentData(),
+        history.start_enabled.isChecked(), history.end_enabled.isChecked(),
+        history.start_date.date(), history.end_date.date(),
+    ) == before_filters
+    assert window.editor is None
+
+
+def test_history_empty_space_context_click_has_no_episode_actions(window, qapp, history_records):
+    history = open_history(window, qapp)
+    viewport = history.entries.viewport()
+    blank = viewport.rect().bottomRight()
+    assert history.entries.itemAt(blank) is None
+
+    QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=blank)
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, blank, viewport.mapToGlobal(blank), Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(viewport, event)
+    qapp.processEvents()
+
+    assert window.editor is None
+    assert qapp.activePopupWidget() is None
 
 
 def test_history_query_failure_retains_results_and_allows_retry(window, qapp, service, history_records, monkeypatch):

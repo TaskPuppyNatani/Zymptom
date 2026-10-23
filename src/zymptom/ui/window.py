@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.today_button.clicked.connect(self.show_today)
         self.history_button.clicked.connect(self.show_history)
         self.history.episode_activated.connect(self.open_episode_id)
+        self.history.episode_delete_requested.connect(self.delete_history_episode)
         self.new_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         self.new_shortcut.activated.connect(self.new_episode)
         self.day_timer = QTimer(self)
@@ -159,6 +160,12 @@ class MainWindow(QMainWindow):
             self._open_error("This entry is no longer available. Entries have been refreshed.")
             return
         self._open_editor(episode)
+
+    def delete_history_episode(self, episode_id):
+        self.open_episode_id(episode_id)
+        editor = self.editor
+        if editor is not None and editor.original is not None and str(editor.original.id) == str(episode_id):
+            editor.delete_entry()
 
     def _open_error(self, message):
         if self.pages.currentWidget() is self.history:
