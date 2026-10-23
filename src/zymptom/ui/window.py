@@ -195,6 +195,8 @@ class MainWindow(QMainWindow):
         editor = EpisodeEditor(self.service, episode, zone=self.zone, now=self.now(), parent=self)
         self.editor = editor
         editor.accepted.connect(self._refresh_views)
+        editor.deleted.connect(self.refresh)
+        editor.deleted.connect(self.history.refresh)
         editor.finished.connect(self._editor_finished)
         editor.finished.connect(editor.deleteLater)
         editor.open()

@@ -6,11 +6,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.resources import files
 
-from PySide6.QtCore import QTimeZone, QTimer, Qt
+from PySide6.QtCore import QTimeZone, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateTimeEdit, QDialog, QFormLayout, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -25,6 +25,8 @@ from .widgets import TagEditor, comfortable
 
 
 class EpisodeEditor(QDialog):
+    deleted = Signal()
+
     def __init__(
         self, service: EpisodeService, episode: FunctionalEpisode | None = None,
         *, zone: QTimeZone | None = None, now=None, parent=None,
@@ -34,6 +36,7 @@ class EpisodeEditor(QDialog):
         self.service = service
         self.original = deepcopy(episode)
         self.saved_episode = None
+        self.delete_confirmation = None
         self.dictation = None
         self.dictation_buttons = {}
         self._dictation_factory = dictation_factory
@@ -146,6 +149,13 @@ class EpisodeEditor(QDialog):
         self.error.hide()
         layout.addWidget(self.error)
         actions = QHBoxLayout()
+        self.delete_button = None
+        if self.original is not None:
+            self.delete_button = QPushButton("Delete entry")
+            comfortable(self.delete_button, "Delete entry")
+            self.delete_button.setToolTip("Permanently delete this saved entry (confirmation required)")
+            self.delete_button.clicked.connect(self.delete_entry)
+            actions.addWidget(self.delete_button)
         self.cancel_button = QPushButton("&Cancel")
         self.save_button = QPushButton("&Save")
         self.save_button.setProperty("primary", True)
@@ -224,6 +234,8 @@ class EpisodeEditor(QDialog):
         self.more_button.setAccessibleDescription("Expanded" if expanded else "Collapsed")
 
     def _dictate(self, field, title):
+        if self.delete_confirmation is not None:
+            return
         if self.dictation is not None:
             self.dictation.raise_()
             return
@@ -257,6 +269,9 @@ class EpisodeEditor(QDialog):
         self.dictation = None
 
     def done(self, result):
+        confirmation, self.delete_confirmation = self.delete_confirmation, None
+        if confirmation is not None:
+            confirmation.reject()
         if self.dictation is not None:
             self.dictation.reject()
         super().done(result)
@@ -295,8 +310,9 @@ class EpisodeEditor(QDialog):
         return previous if text == self._initial_notes[field] else (text or None)
 
     def save(self):
-        if self.dictation is not None:
+        if self.dictation is not None or self.delete_confirmation is not None:
             return
+        self.error.setAccessibleName("Save error")
         self.error.hide()
         try:
             if not self.activity.text().strip():
@@ -336,3 +352,48 @@ class EpisodeEditor(QDialog):
             return
         self.saved_episode = saved
         self.accept()
+
+    def delete_entry(self):
+        if self.original is None or self.dictation is not None or self.delete_confirmation is not None:
+            return
+        confirmation = QMessageBox(self)
+        confirmation.setWindowTitle("Delete entry?")
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setTextFormat(Qt.TextFormat.PlainText)
+        confirmation.setText("Permanently delete this entry?")
+        local = to_local(self.original.occurred_at, self.zone)
+        confirmation.setInformativeText(
+            f"{self.original.activity}\n{local.toString('ddd, MMM d, yyyy  h:mm AP t')}\n\n"
+            "This cannot be undone. Unsaved edits will be discarded."
+        )
+        delete = confirmation.addButton("Delete entry", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = confirmation.addButton(QMessageBox.StandardButton.Cancel)
+        comfortable(delete, "Permanently delete entry")
+        comfortable(cancel, "Cancel deletion")
+        confirmation.setDefaultButton(cancel)
+        confirmation.setEscapeButton(cancel)
+        self.delete_confirmation = confirmation
+        confirmation.finished.connect(lambda _: self._finish_delete(confirmation, delete))
+        confirmation.finished.connect(confirmation.deleteLater)
+        confirmation.open()
+
+    def _finish_delete(self, confirmation, delete):
+        if self.delete_confirmation is not confirmation:
+            return  # Closing the editor cancels its confirmation.
+        self.delete_confirmation = None
+        if confirmation.clickedButton() is not delete:
+            return
+        try:
+            if not self.service.delete(self.original.id):
+                raise EpisodeNotFoundError(self.original.id)
+        except (sqlite3.Error, OSError, RuntimeError, ValueError, EpisodeNotFoundError):
+            self.error.setAccessibleName("Delete error")
+            self.error.setText(
+                "Could not delete this entry. Your changes are still here. "
+                "Try Delete entry again, or Cancel to close the editor."
+            )
+            self.error.show()
+            self.error.setFocus()
+            return
+        self.deleted.emit()
+        self.reject()

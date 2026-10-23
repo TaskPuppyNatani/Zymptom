@@ -4,7 +4,7 @@ Zymptom is a local-first functional journal. Its atomic record is a
 `FunctionalEpisode`: one real-world attempt to perform an activity, including
 duration, difficulties, adaptations, help, outcome, recovery, and ability to resume.
 
-This repository implements **Z2.2 — Local Voice Dictation**, on the existing
+This repository implements **Z2.3 — Delete Functional Episodes**, on the existing
 logger and history foundation. The PySide6 desktop app opens on Today and lets you record,
 reopen, edit, and find functional attempts. The domain, SQLite persistence, and
 services remain independent of Qt. Exports, summaries, and other Z3 features are
@@ -81,6 +81,18 @@ same pytest fixtures and real temporary databases as the foundation tests:
 ```bash
 QT_QPA_PLATFORM=offscreen python -m pytest tests/ui
 ```
+
+## Delete an entry
+
+Open a saved episode from Today or History, then choose **Delete entry** on the
+left of the editor's action row. The confirmation shows the saved activity and
+local date/time. **Cancel** is the default; only explicitly choosing **Delete
+entry** permanently removes that episode and its related tags. Unsaved edits are
+discarded. New unsaved episodes have no Delete action.
+
+Successful deletion closes the editor and immediately refreshes Today and History
+while retaining History's active filters. If deletion fails, the editor stays
+open with the draft intact and an error, allowing retry or cancellation.
 
 ## Local voice dictation
 
