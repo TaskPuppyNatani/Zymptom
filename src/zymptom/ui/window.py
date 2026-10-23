@@ -16,6 +16,7 @@ from .editor import EpisodeEditor
 from .history import HistoryView
 from .episode_context_menu import connect_episode_context_menu
 from .branding import application_icon, brand_mark
+from .export_dialog import ExportDialog
 from .labels import OUTCOMES
 from .time import to_local
 from .widgets import comfortable
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
         self.zone = zone or QTimeZone.systemTimeZone()
         self.now = now or (lambda: datetime.now(UTC))
         self.editor = None
+        self.export_dialog = None
         self.setWindowTitle("Zymptom — Today")
         self.setWindowIcon(application_icon())
         self.resize(640, 640)
@@ -52,6 +54,9 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             self.navigation_group.addButton(button)
             navigation.addWidget(button)
+        self.export_button = QPushButton("Export / Summary…")
+        comfortable(self.export_button, "Export episodes and view deterministic summary")
+        navigation.addWidget(self.export_button)
         self.today_button.setChecked(True)
         layout.addLayout(navigation)
         self.log_button = QPushButton("+ Log Something")
@@ -101,6 +106,7 @@ class MainWindow(QMainWindow):
         self.retry_button.clicked.connect(self.refresh)
         self.today_button.clicked.connect(self.show_today)
         self.history_button.clicked.connect(self.show_history)
+        self.export_button.clicked.connect(self.open_export_dialog)
         self.history.episode_activated.connect(self.open_episode_id)
         self.history.episode_delete_requested.connect(self.delete_episode_from_context_menu)
         self.new_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
@@ -199,6 +205,20 @@ class MainWindow(QMainWindow):
         self.day_label.hide()
         self.setWindowTitle("Zymptom — History")
         self.history.refresh()
+
+    def open_export_dialog(self):
+        if self.export_dialog is not None:
+            self.export_dialog.raise_()
+            self.export_dialog.activateWindow()
+            return
+        dialog = ExportDialog(self.service, zone=self.zone, now=self.now(), parent=self)
+        self.export_dialog = dialog
+        dialog.finished.connect(self._export_dialog_finished)
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+
+    def _export_dialog_finished(self):
+        self.export_dialog = None
 
     def _open_editor(self, episode=None):
         if self.editor is not None:
