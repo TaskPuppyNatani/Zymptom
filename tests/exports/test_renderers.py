@@ -7,7 +7,8 @@ import pytest
 
 from zymptom.domain import EpisodeOutcome, FunctionalEpisode, HelpLevel, ResumeAbility
 from zymptom.exports import (
-    ExportRange, render_csv, render_json, render_markdown, render_summary, summarize,
+    ExportRange, render_csv, render_json, render_markdown, render_summary,
+    render_summary_details, summarize,
 )
 
 ZONE = "America/Los_Angeles"
@@ -90,16 +91,22 @@ def test_csv_keeps_empty_and_missing_values_distinct():
     assert row["help_level"] == ""
 
 
-def test_markdown_is_chronological_grouped_by_local_date_and_preserves_exact_text(full_episode):
+def test_markdown_is_human_readable_and_preserves_multiline_notes(full_episode):
     first = FunctionalEpisode(
         activity="Café — activity\nwith `fences` and *markup*",
         outcome=EpisodeOutcome.COMPLETED_WITH_ADAPTATION,
         occurred_at=datetime(2026, 10, 21, 18, tzinfo=UTC),
-        symptom_notes="note with <markup> & text",
+        functional_demands=["sensory_tolerance"],
+        symptoms=["sensory_overload", "cognitive_difficulty"],
+        adaptations=["changed_position"],
         help_level=HelpLevel.NONE,
         recovery_required=False,
+        consequences=["needed_rest"],
+        recovery_actions=["lay_down"],
         resume_ability=ResumeAbility.IMMEDIATELY,
+        notes="Line one\nLine two ☕",
     )
+    full_episode.notes = "Rested after reading.\nContinued later."
     export_range = ExportRange(date(2026, 10, 20), date(2026, 10, 21), ZONE)
     episodes = [first, full_episode]
     summary = summarize(episodes)
@@ -107,12 +114,70 @@ def test_markdown_is_chronological_grouped_by_local_date_and_preserves_exact_tex
     report = render_markdown(episodes, summary, export_range)
 
     assert report.index("### October 20, 2026") < report.index("### October 21, 2026")
-    assert "Activity (exact stored text)" in report
-    assert "Café — activity\nwith `fences` and *markup*" in report
-    assert "note with <markup> & text" in report
-    assert "Functional demands" in report and '"sitting","concentration","sitting"' in report
-    assert "Between" not in report  # Narrative remains factual and template-derived.
+    assert "#### 8:30 AM PDT" in report and "#### 11:00 AM PDT" in report
+    assert "**Outcome:** Stopped early" in report
+    assert "**Outcome:** Completed with adaptation" in report
+    assert "Sensory tolerance" in report and "Sensory overload" in report
+    assert "Cognitive difficulty" in report and "Changed position" in report
+    assert "Needed rest" in report and "Lay down" in report
+    assert "stopped_early" not in report and "sensory_overload" not in report
+    assert "Functional demands" in report
+    assert "- Sitting" in report and "- Concentration" in report
+    assert "- Sensory tolerance" in report
+    assert '["sitting"' not in report and '["sensory_tolerance"' not in report
+    assert "**Activity:** Café — activity  \nwith \\`fences\\` and \\*markup\\*" in report
+    assert "**Notes:** Line one  \nLine two ☕" in report
+    assert "**Notes:** Rested after reading\\.  \nContinued later\\." in report
+    assert "**Recovery required:** Not required" in report
+    assert "Completed with adaptation: 1" in report
+    assert "Stopped early: 1" in report
+    assert "Recovery was recorded as required after 1 attempt" in report
+    assert "not required after 1 attempt" in report
+    assert str(full_episode.id) not in report
+    assert "Timestamp (UTC)" not in report
+    assert "Created (UTC)" not in report and "Updated (UTC)" not in report
+    assert "2026-10-20T15:30" not in report
     assert render_markdown(episodes, summary, export_range) == report
+
+
+def test_markdown_shows_missing_values_without_inference_and_keeps_zero_values():
+    episode = FunctionalEpisode(
+        activity="Short task",
+        outcome=EpisodeOutcome.STOPPED_EARLY,
+        occurred_at=datetime(2026, 10, 20, 15, tzinfo=UTC),
+        duration_minutes=0,
+        recovery_required=None,
+        recovery_minutes=0,
+    )
+    report = render_markdown(
+        [episode], summarize([episode]), ExportRange(None, None, ZONE),
+    )
+
+    assert "**Duration:** 0 minutes" in report
+    assert "**Recovery required:** Not recorded" in report
+    assert "**Recovery duration:** 0 minutes" in report
+    assert "**Help:** Not recorded" in report
+    assert "**Resume ability:** Not recorded" in report
+    assert "**Symptoms:** None recorded" in report
+    assert "**Notes:** Not recorded" in report
+    assert "- Required: 0" in report
+    assert "- Not required: 0" in report
+    assert "- Not recorded: 1" in report
+
+
+def test_markdown_summary_details_use_display_labels_without_changing_counts(full_episode):
+    summary = summarize([full_episode])
+    details = render_summary_details(summary, ExportRange(None, None, ZONE))
+
+    assert "- Stopped early: 1" in details
+    assert "- Some help: 1" in details
+    assert "- Later the same day: 1" in details
+    assert "- Sitting: 1" in details
+    assert "- Changed position: 1" in details
+    assert "stopped_early" not in details
+    assert "later_same_day" not in details
+    assert summary.total_attempts == 1
+    assert summary.outcome_groups["stopped_early"] == 1
 
 
 def test_empty_markdown_and_summary_name_the_empty_range():

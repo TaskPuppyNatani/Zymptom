@@ -20,7 +20,7 @@ def test_export_surface_is_reachable_and_defaults_to_all_records(window, qapp, s
     assert dialog.isVisible()
     assert not dialog.start_enabled.isChecked()
     assert not dialog.end_enabled.isChecked()
-    assert "1 functional attempts were recorded" in dialog.preview.toPlainText()
+    assert "1 functional attempt was recorded" in dialog.preview.toPlainText()
     assert dialog.export_button.isEnabled()
     dialog.reject()
     qapp.processEvents()

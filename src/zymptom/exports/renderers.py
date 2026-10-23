@@ -9,6 +9,10 @@ from zoneinfo import ZoneInfo
 
 from zymptom.domain import FunctionalEpisode
 from zymptom.domain.validation import serialize_timestamp
+from zymptom.ui.labels import (
+    ADAPTATIONS, CONSEQUENCES, FUNCTIONAL_DEMANDS, HELP_LEVELS, OUTCOMES,
+    RECOVERY_ACTIONS, RESUME_ABILITIES, SYMPTOMS,
+)
 
 from .summary import DurationStats, FunctionalSummary
 
@@ -24,6 +28,19 @@ CSV_FIELDS = (
 TAG_FIELDS = (
     "functional_demands", "symptoms", "adaptations", "consequences", "recovery_actions",
 )
+_OUTCOME_LABELS = {getattr(key, "value", key): label for key, label in OUTCOMES.items()}
+_HELP_LABELS = {getattr(key, "value", key): label for key, label in HELP_LEVELS.items()}
+_RESUME_LABELS = {getattr(key, "value", key): label for key, label in RESUME_ABILITIES.items()}
+_DEMAND_LABELS = {getattr(key, "value", key): label for key, label in FUNCTIONAL_DEMANDS.items()}
+_SYMPTOM_LABELS = {getattr(key, "value", key): label for key, label in SYMPTOMS.items()}
+_ADAPTATION_LABELS = {getattr(key, "value", key): label for key, label in ADAPTATIONS.items()}
+_CONSEQUENCE_LABELS = {getattr(key, "value", key): label for key, label in CONSEQUENCES.items()}
+_RECOVERY_ACTION_LABELS = {
+    getattr(key, "value", key): label for key, label in RECOVERY_ACTIONS.items()
+}
+_RECOVERY_REQUIRED_LABELS = {
+    "yes": "Required", "no": "Not required", "not_recorded": "Not recorded",
+}
 _MONTHS = (
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -123,22 +140,31 @@ def _range_label(export_range: ExportRange) -> str:
     return "all recorded dates"
 
 
-def _frequency_lines(title: str, values) -> list[str]:
+def _frequency_lines(title: str, values, labels=None, *, exact_text: bool = False) -> list[str]:
+    lines = [f"### {title}", ""]
     if not values:
-        return [f"- {title}: none recorded"]
-    return [f"- {title} (episodes containing each value):"] + [
-        f"  - {_code(value.value)}: {value.episodes}" for value in values
-    ]
+        return [*lines, "None recorded", ""]
+    lines.extend(
+        f"- {_inline(value.value if exact_text else _label(value.value, labels))}: {value.episodes}"
+        for value in values
+    )
+    lines.append("")
+    return lines
+
+
+def _quantity(value: int, singular: str) -> str:
+    return f"{value} {singular if value == 1 else singular + 's'}"
 
 
 def _duration_line(title: str, stats: DurationStats) -> str:
     if stats.recorded_count == 0 and stats.missing_count == 0:
         return f"- {title}: no attempts"
     if stats.recorded_count == 0:
-        return f"- {title}: not recorded for {stats.missing_count} attempts"
+        return f"- {title}: not recorded for {_quantity(stats.missing_count, 'attempt')}"
     range_text = f"; range {stats.minimum_minutes}–{stats.maximum_minutes} minutes"
     return (
-        f"- {title}: {stats.recorded_count} recorded, {stats.missing_count} not recorded; "
+        f"- {title}: recorded for {_quantity(stats.recorded_count, 'attempt')}; "
+        f"not recorded for {_quantity(stats.missing_count, 'attempt')}; "
         f"total {stats.total_minutes} minutes{range_text}"
     )
 
@@ -147,8 +173,10 @@ def render_summary(summary: FunctionalSummary, export_range: ExportRange) -> str
     if summary.total_attempts == 0:
         return f"No functional attempts were recorded for {_range_label(export_range)}."
     groups = summary.outcome_groups
+    attempt = "attempt" if summary.total_attempts == 1 else "attempts"
+    verb = "was" if summary.total_attempts == 1 else "were"
     narrative = (
-        f"For {_range_label(export_range)}, {summary.total_attempts} functional attempts were recorded "
+        f"For {_range_label(export_range)}, {summary.total_attempts} functional {attempt} {verb} recorded "
         f"({groups['completed']} completed, {groups['stopped_early']} stopped early, "
         f"{groups['unable_to_complete']} unable to complete, "
         f"{groups['avoided_due_to_limitation']} avoided due to limitation)."
@@ -156,33 +184,48 @@ def render_summary(summary: FunctionalSummary, export_range: ExportRange) -> str
     recovery = summary.recovery_required_counts
     if recovery["yes"] or recovery["no"]:
         narrative += (
-            f" Recovery was recorded as required after {recovery['yes']} attempts; "
-            f"not required after {recovery['no']}; status not recorded for {recovery['not_recorded']}."
+            f" Recovery was recorded as required after {_quantity(recovery['yes'], 'attempt')}; "
+            f"not required after {_quantity(recovery['no'], 'attempt')}; "
+            f"status not recorded for {_quantity(recovery['not_recorded'], 'attempt')}."
         )
     return narrative
 
 
 def _summary_section(summary: FunctionalSummary, export_range: ExportRange) -> list[str]:
     lines = ["## Deterministic summary", "", render_summary(summary, export_range), ""]
-    lines.append("### Outcomes")
-    lines.extend(f"- {_code(outcome)}: {count}" for outcome, count in summary.outcome_counts.items())
+    lines.extend(["### Outcomes", ""])
+    lines.extend(
+        f"- {_label(outcome, _OUTCOME_LABELS)}: {count}"
+        for outcome, count in summary.outcome_counts.items()
+    )
     lines.extend([
         "",
-        "### Recorded details",
-        f"- Help levels: {', '.join(f'{_code(key)} {value}' for key, value in summary.help_level_counts.items())}",
+        "### Help levels",
+        "",
+        *(f"- {_label(key, _HELP_LABELS)}: {value}" for key, value in summary.help_level_counts.items()),
         f"- Episodes with help recorded by outcome or level: {summary.episodes_with_help}",
-        f"- Recovery required: yes {summary.recovery_required_counts['yes']}, "
-        f"no {summary.recovery_required_counts['no']}, "
-        f"not recorded {summary.recovery_required_counts['not_recorded']}",
-        f"- Resume ability: {', '.join(f'{_code(key)} {value}' for key, value in summary.resume_ability_counts.items())}",
+        "",
+        "### Recovery required",
+        "",
+        *(
+            f"- {_RECOVERY_REQUIRED_LABELS[key]}: {value}"
+            for key, value in summary.recovery_required_counts.items()
+        ),
+        "",
+        "### Resume ability",
+        "",
+        *(f"- {_label(key, _RESUME_LABELS)}: {value}" for key, value in summary.resume_ability_counts.items()),
+        "",
+        "### Durations",
+        "",
         _duration_line("Activity duration", summary.duration),
         _duration_line("Recovery duration", summary.recovery_duration),
         "",
-        *_frequency_lines("Functional demands", summary.functional_demands),
-        *_frequency_lines("Symptoms", summary.symptoms),
-        *_frequency_lines("Adaptations", summary.adaptations),
-        *_frequency_lines("Activity frequencies (exact stored text)", summary.activities),
     ])
+    lines.extend(_frequency_lines("Functional demands", summary.functional_demands, _DEMAND_LABELS))
+    lines.extend(_frequency_lines("Symptoms", summary.symptoms, _SYMPTOM_LABELS))
+    lines.extend(_frequency_lines("Adaptations", summary.adaptations, _ADAPTATION_LABELS))
+    lines.extend(_frequency_lines("Activity frequencies", summary.activities, exact_text=True))
     return lines
 
 
@@ -196,71 +239,89 @@ def _inline(value: str) -> str:
     return value.replace("\n", " ").replace("\r", " ")
 
 
-def _code(value: str) -> str:
-    longest = max(_backtick_runs(value), default=0)
-    fence = "`" * max(1, longest + 1)
-    return f"{fence}{value}{fence}"
-
-
-def _fenced(label: str, value: str) -> list[str]:
-    longest = max(_backtick_runs(value), default=0)
-    fence = "`" * max(3, longest + 1)
-    return [f"- {label}:", "", fence, value, fence]
-
-
-def _backtick_runs(value: str):
-    current = 0
-    for char in value:
-        if char == "`":
-            current += 1
-        elif current:
-            yield current
-            current = 0
-    if current:
-        yield current
-
-
-def _display(value, *, missing="Not recorded") -> str:
+def _label(value, labels=None) -> str:
     if value is None:
-        return missing
-    if isinstance(value, bool):
-        return "Yes" if value else "No"
-    if hasattr(value, "value"):
-        return value.value
-    return str(value)
+        return "Not recorded"
+    raw = value.value if hasattr(value, "value") else str(value)
+    if labels is not None and raw in labels:
+        return labels[raw]
+    if raw == "not_recorded":
+        return "Not recorded"
+    if "_" in raw:
+        return raw.replace("_", " ").title()
+    return raw[:1].upper() + raw[1:]
+
+
+def _value_field(label: str, value, labels=None, *, unit: str | None = None) -> list[str]:
+    if value is None:
+        display = "Not recorded"
+    elif isinstance(value, bool):
+        display = "Yes" if value else "No"
+    elif labels is not None or hasattr(value, "value"):
+        display = _label(value, labels)
+    else:
+        display = str(value)
+    if unit is not None and value is not None:
+        display = f"{display} {unit}"
+    return [f"**{label}:** {display}"]
+
+
+def _list_field(label: str, values: list[str], labels=None) -> list[str]:
+    if not values:
+        return [f"**{label}:** None recorded"]
+    return [f"**{label}:**", *(f"- {_inline(_label(value, labels))}" for value in values)]
+
+
+def _text_field(label: str, value: str | None) -> list[str]:
+    if value is None:
+        return [f"**{label}:** Not recorded"]
+    if value == "":
+        return [f"**{label}:** (empty)"]
+    lines = value.split("\n")
+    rendered = [f"**{label}:** {_inline(lines[0])}"]
+    for index, line in enumerate(lines[1:], start=1):
+        rendered.append(_inline(line))
+        if index < len(lines) - 1:
+            rendered[-1] += "  "
+    if len(lines) > 1:
+        rendered[0] += "  "
+    return rendered
 
 
 def _entry_lines(episode: FunctionalEpisode, zone: ZoneInfo) -> list[str]:
     local = episode.occurred_at.astimezone(zone)
     hour = local.hour % 12 or 12
     meridiem = "AM" if local.hour < 12 else "PM"
-    title = f"{hour}:{local.minute:02d} {meridiem} — {_inline(episode.activity)}"
-    lines = [f"#### {title}", f"- ID: `{episode.id}`", f"- Timestamp (UTC): `{serialize_timestamp(episode.occurred_at)}`"]
-    lines.extend(_fenced("Activity (exact stored text)", episode.activity))
-    for label, value in (
-        ("Activity duration (minutes)", episode.duration_minutes),
-        ("Outcome", episode.outcome),
-        ("Functional demands", episode.functional_demands),
-        ("Symptoms", episode.symptoms),
-        ("Adaptations", episode.adaptations),
-        ("Help level", episode.help_level),
-        ("Consequences", episode.consequences),
-        ("Recovery required", episode.recovery_required),
-        ("Recovery actions", episode.recovery_actions),
-        ("Recovery duration (minutes)", episode.recovery_minutes),
-        ("Resume ability", episode.resume_ability),
-    ):
-        if isinstance(value, list):
-            lines.extend(_fenced(label, json.dumps(value, ensure_ascii=False, separators=(",", ":"))))
-        else:
-            lines.append(f"- {label}: {_code(_display(value))}")
-    lines.extend(_fenced("Symptom notes", episode.symptom_notes) if episode.symptom_notes is not None else ["- Symptom notes: Not recorded"])
-    lines.extend(_fenced("Help notes", episode.help_notes) if episode.help_notes is not None else ["- Help notes: Not recorded"])
-    lines.extend(_fenced("General notes", episode.notes) if episode.notes is not None else ["- General notes: Not recorded"])
-    lines.extend([
-        f"- Created (UTC): `{serialize_timestamp(episode.created_at)}`",
-        f"- Updated (UTC): `{serialize_timestamp(episode.updated_at)}`",
-    ])
+    timezone_abbreviation = local.tzname()
+    local_time = f"{hour}:{local.minute:02d} {meridiem}"
+    if timezone_abbreviation:
+        local_time += f" {timezone_abbreviation}"
+    recovery_label = _RECOVERY_REQUIRED_LABELS[
+        "not_recorded" if episode.recovery_required is None else "yes" if episode.recovery_required else "no"
+    ]
+    sections = [
+        [f"#### {local_time}"],
+        _text_field("Activity", episode.activity),
+        _value_field("Outcome", episode.outcome, _OUTCOME_LABELS),
+        _value_field("Duration", episode.duration_minutes, unit="minutes"),
+        _list_field("Functional demands", episode.functional_demands, _DEMAND_LABELS),
+        _list_field("Symptoms", episode.symptoms, _SYMPTOM_LABELS),
+        _text_field("Symptom notes", episode.symptom_notes),
+        _list_field("Adaptations", episode.adaptations, _ADAPTATION_LABELS),
+        _value_field("Help", episode.help_level, _HELP_LABELS),
+        _text_field("Help notes", episode.help_notes),
+        _list_field("Consequences", episode.consequences, _CONSEQUENCE_LABELS),
+        [f"**Recovery required:** {recovery_label}"],
+        _list_field("Recovery actions", episode.recovery_actions, _RECOVERY_ACTION_LABELS),
+        _value_field("Recovery duration", episode.recovery_minutes, unit="minutes"),
+        _value_field("Resume ability", episode.resume_ability, _RESUME_LABELS),
+        _text_field("Notes", episode.notes),
+    ]
+    lines = []
+    for section in sections:
+        if lines:
+            lines.append("")
+        lines.extend(section)
     return lines
 
 
