@@ -4,9 +4,10 @@ import sqlite3
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
+from importlib.resources import files
 
 from PySide6.QtCore import QTimeZone, QTimer, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateTimeEdit, QDialog, QFormLayout, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
@@ -18,6 +19,7 @@ from zymptom.persistence import EpisodeNotFoundError
 from zymptom.services import EpisodeService
 
 from . import labels
+from .dictation import DictationDialog, append_transcript
 from .time import to_local, to_utc
 from .widgets import TagEditor, comfortable
 
@@ -26,11 +28,15 @@ class EpisodeEditor(QDialog):
     def __init__(
         self, service: EpisodeService, episode: FunctionalEpisode | None = None,
         *, zone: QTimeZone | None = None, now=None, parent=None,
+        dictation_factory=DictationDialog,
     ):
         super().__init__(parent)
         self.service = service
         self.original = deepcopy(episode)
         self.saved_episode = None
+        self.dictation = None
+        self.dictation_buttons = {}
+        self._dictation_factory = dictation_factory
         self.zone = zone or QTimeZone.systemTimeZone()
         self.setWindowTitle("Edit entry" if episode else "Log something")
         self.resize(660, 720)
@@ -51,7 +57,7 @@ class EpisodeEditor(QDialog):
 
         self.activity = QLineEdit(episode.activity if episode else "")
         self.activity.setPlaceholderText("For example, homework or making lunch")
-        self._row(common, "What happened?", self.activity)
+        self._row(common, "What happened?", self.activity, dictation_field="activity")
         self.when = QDateTimeEdit()
         self.when.setTimeZone(self.zone)
         self.when.setCalendarPopup(True)
@@ -104,17 +110,17 @@ class EpisodeEditor(QDialog):
             self.tags[field] = editor
             self._row(detail_form, title, editor)
         self.symptom_notes = self._notes(episode.symptom_notes if episode else None)
-        self._row(detail_form, "Symptom notes", self.symptom_notes)
+        self._row(detail_form, "Symptom notes", self.symptom_notes, dictation_field="symptom_notes")
         self.help_level = self._combo(labels.HELP_LEVELS, episode.help_level if episode else None)
         self._row(detail_form, "Help", self.help_level)
         self.help_notes = self._notes(episode.help_notes if episode else None)
-        self._row(detail_form, "Help notes", self.help_notes)
+        self._row(detail_form, "Help notes", self.help_notes, dictation_field="help_notes")
         self.recovery_required = self._combo({True: "Yes", False: "No"}, episode.recovery_required if episode else None)
         self._row(detail_form, "Recovery required?", self.recovery_required)
         self.resume_ability = self._combo(labels.RESUME_ABILITIES, episode.resume_ability if episode else None)
         self._row(detail_form, "Able to resume", self.resume_ability)
         self.notes = self._notes(episode.notes if episode else None)
-        self._row(detail_form, "Notes", self.notes)
+        self._row(detail_form, "Notes", self.notes, dictation_field="notes")
         self._initial_notes = {
             field: getattr(self, field).toPlainText()
             for field in ("symptom_notes", "help_notes", "notes")
@@ -155,16 +161,30 @@ class EpisodeEditor(QDialog):
         self.save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
         self.save_shortcut.activated.connect(self.save)
         # Tab order follows the form, then detail controls, then Cancel and Save.
-        self.setTabOrder(self.activity, self.when)
+        self.setTabOrder(self.activity, self.dictation_buttons["activity"])
+        self.setTabOrder(self.dictation_buttons["activity"], self.when)
         self.setTabOrder(self.when, self.duration)
         self.setTabOrder(self.duration, self.outcome)
 
-    @staticmethod
-    def _row(form, label, widget):
+    def _row(self, form, label, widget, *, dictation_field=None):
         comfortable(widget, label)
         text = QLabel(label)
         text.setBuddy(widget.input if isinstance(widget, TagEditor) else widget)
-        form.addRow(text, widget)
+        if dictation_field is None:
+            form.addRow(text, widget)
+            return
+        button = QPushButton()
+        button.setIcon(QIcon(str(files("zymptom.ui").joinpath("assets/microphone.svg"))))
+        comfortable(button, f"Dictate into {label}")
+        button.setMinimumWidth(button.minimumHeight())
+        button.setToolTip(f"Dictate into {label} locally; review before inserting")
+        button.clicked.connect(lambda checked=False: self._dictate(dictation_field, label))
+        self.dictation_buttons[dictation_field] = button
+        row = QHBoxLayout()
+        row.addWidget(widget, 1)
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        form.addRow(text, row)
+        self.setTabOrder(widget, button)
 
     @staticmethod
     def _minutes(value):
@@ -203,6 +223,44 @@ class EpisodeEditor(QDialog):
         self.more_button.setText("More details ▾" if expanded else "More details ▸")
         self.more_button.setAccessibleDescription("Expanded" if expanded else "Collapsed")
 
+    def _dictate(self, field, title):
+        if self.dictation is not None:
+            self.dictation.raise_()
+            return
+        dialog = self._dictation_factory(title, self)
+        self.dictation = dialog
+        dialog.accepted.connect(lambda: self._insert_dictation(field, dialog.inserted_text))
+        dialog.finished.connect(self._dictation_finished)
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+        dialog.start()
+
+    def _insert_dictation(self, field, text):
+        widget = getattr(self, field)
+        if isinstance(widget, QLineEdit):
+            old_text = widget.text()
+            combined = append_transcript(old_text, text, multiline=False)
+            widget.end(False)
+            widget.insert(combined[len(old_text):])
+        else:
+            self.more_button.setChecked(True)
+            # Append with the document cursor, preserving the existing undo history.
+            cursor = widget.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            old_text = widget.toPlainText()
+            combined = append_transcript(old_text, text, multiline=True)
+            cursor.insertText(combined[len(old_text):])
+            widget.setTextCursor(cursor)
+        widget.setFocus()
+
+    def _dictation_finished(self):
+        self.dictation = None
+
+    def done(self, result):
+        if self.dictation is not None:
+            self.dictation.reject()
+        super().done(result)
+
     def showEvent(self, event):
         super().showEvent(event)
         if self.original is None:
@@ -237,6 +295,8 @@ class EpisodeEditor(QDialog):
         return previous if text == self._initial_notes[field] else (text or None)
 
     def save(self):
+        if self.dictation is not None:
+            return
         self.error.hide()
         try:
             if not self.activity.text().strip():

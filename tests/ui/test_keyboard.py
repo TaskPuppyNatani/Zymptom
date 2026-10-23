@@ -9,6 +9,8 @@ def test_new_entry_focus_and_logical_first_tab_steps(make_editor, qapp):
     editor = make_editor()
     assert QApplication.focusWidget() is editor.activity
     QTest.keyClick(editor.activity, Qt.Key.Key_Tab)
+    assert QApplication.focusWidget() is editor.dictation_buttons["activity"]
+    QTest.keyClick(editor.dictation_buttons["activity"], Qt.Key.Key_Tab)
     assert QApplication.focusWidget() is editor.when
     # Qt traverses the date/time's editable sections before leaving the control.
     for _ in range(editor.when.sectionCount() + 1):

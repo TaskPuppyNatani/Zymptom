@@ -4,8 +4,8 @@ Zymptom is a local-first functional journal. Its atomic record is a
 `FunctionalEpisode`: one real-world attempt to perform an activity, including
 duration, difficulties, adaptations, help, outcome, recovery, and ability to resume.
 
-This repository implements **Z2 — History / Timeline + Search**, on the existing
-logger foundation. The PySide6 desktop app opens on Today and lets you record,
+This repository implements **Z2.2 — Local Voice Dictation**, on the existing
+logger and history foundation. The PySide6 desktop app opens on Today and lets you record,
 reopen, edit, and find functional attempts. The domain, SQLite persistence, and
 services remain independent of Qt. Exports, summaries, and other Z3 features are
 not included.
@@ -81,6 +81,51 @@ same pytest fixtures and real temporary databases as the foundation tests:
 ```bash
 QT_QPA_PLATFORM=offscreen python -m pytest tests/ui
 ```
+
+## Local voice dictation
+
+In the episode editor, click the microphone button beside the text field you
+want to dictate into. Activity, symptom notes, help notes, and general notes are
+supported. Expand **More details** to reach the notes fields and their microphone
+buttons. The existing editor has no separate recovery-notes field.
+The dialog shows **Listening…** while recording. Choose **Stop** to transcribe,
+review and edit the result, then explicitly choose **Insert text**. Inserting
+appends to existing text (a space for activity, a new line for notes) and never
+saves the episode. Choose the editor's Save separately. Cancel, Escape, or closing
+the dialog discards dictation and leaves the destination unchanged.
+
+Dictation uses Qt Multimedia's default desktop microphone and a separately
+installed local [whisper.cpp CLI](https://github.com/ggml-org/whisper.cpp/tree/master/examples/cli).
+Provide an existing whisper.cpp-compatible model file; Zymptom does not install
+engines, download models, or use cloud transcription. Configure the process
+environment before launching, for example:
+
+```bash
+export ZYMPTOM_WHISPER_MODEL="/absolute/path/to/ggml-base.en.bin"
+# Optional if whisper-cli is already on PATH:
+export ZYMPTOM_WHISPER_COMMAND="/absolute/path/to/whisper-cli"
+zymptom
+```
+
+`ZYMPTOM_WHISPER_COMMAND` is one trusted local whisper.cpp-compatible executable
+path or command name, without shell syntax or extra arguments. The adapter
+passes the local model and WAV paths directly to that process and requests a
+UTF-8 text file. Other speech engines can implement the small `AudioCapture` /
+`LocalTranscriber` ports without changing the editor or episode schema.
+
+Linux is the primary capture platform. Qt Multimedia needs a working system
+audio service, a default microphone, and input permission. The device must support
+16 kHz mono, 16-bit PCM capture. Missing engines/models, unavailable microphones,
+and recording/transcription errors are reported in the dialog; typed logging
+remains available. Recording stops after two minutes; transcription times out
+after five minutes. Cancel also stops transcription.
+
+Audio and intermediate transcript files live only in a private temporary session
+directory. They are removed before transcript review and on failure, cancellation,
+editor close, and normal application shutdown. Audio never enters the journal.
+An abrupt process termination or power loss can prevent normal cleanup; this is
+not an audio history feature. Automated dictation tests use fake audio devices
+and local test processes, requiring neither a microphone nor Whisper.
 
 ## History and search
 
@@ -189,6 +234,7 @@ src/zymptom/
     domain/        # Dataclass, enums, validation, timestamp conversion
     persistence/   # SQLite connection, migrations, atomic CRUD
     services/      # Small application-facing episode service
+    dictation/     # Temporary audio capture, local STT port/adapter, session
     ui/            # Today, editor, Qt controls, local-time boundary, app lifetime
 tests/
     domain/

@@ -36,6 +36,14 @@ def stylesheet() -> str:
         QLabel {{ background: transparent; }}
         QLabel[tone="secondary"] {{ color: {TEXT_SECONDARY}; }}
         QLabel[tone="muted"] {{ color: {TEXT_MUTED}; }}
+        QLabel[role="dictation"] {{
+            background: {SURFACE}; color: {TEXT_SECONDARY};
+            border: 1px solid {BORDER}; border-radius: 6px; padding: 10px;
+        }}
+        QLabel[role="dictation"][state="listening"] {{
+            color: {TEXT_PRIMARY}; background: {SELECTION}; border: 2px solid {ACCENT_HOVER};
+        }}
+        QLabel[role="dictation"][state="transcribing"] {{ border-color: {ACCENT}; }}
         QScrollArea {{ border: none; }}
         QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QComboBox {{
             background: {SURFACE};
