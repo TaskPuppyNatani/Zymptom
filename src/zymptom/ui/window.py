@@ -14,6 +14,7 @@ from zymptom.services import EpisodeService
 
 from .editor import EpisodeEditor
 from .history import HistoryView
+from .episode_context_menu import connect_episode_context_menu
 from .branding import application_icon, brand_mark
 from .labels import OUTCOMES
 from .time import to_local
@@ -71,6 +72,11 @@ class MainWindow(QMainWindow):
         self.entries.setAccessibleName("Today's episodes. Select an entry to edit it.")
         self.entries.setWordWrap(True)
         self.entries.setSpacing(6)
+        connect_episode_context_menu(
+            self.entries,
+            on_edit=self.open_episode_id,
+            on_delete=self.delete_episode_from_context_menu,
+        )
         today_layout.addWidget(self.entries, 1)
         self.error = QLabel()
         self.error.setProperty("role", "error")
@@ -96,7 +102,7 @@ class MainWindow(QMainWindow):
         self.today_button.clicked.connect(self.show_today)
         self.history_button.clicked.connect(self.show_history)
         self.history.episode_activated.connect(self.open_episode_id)
-        self.history.episode_delete_requested.connect(self.delete_history_episode)
+        self.history.episode_delete_requested.connect(self.delete_episode_from_context_menu)
         self.new_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
         self.new_shortcut.activated.connect(self.new_episode)
         self.day_timer = QTimer(self)
@@ -161,7 +167,7 @@ class MainWindow(QMainWindow):
             return
         self._open_editor(episode)
 
-    def delete_history_episode(self, episode_id):
+    def delete_episode_from_context_menu(self, episode_id):
         self.open_episode_id(episode_id)
         editor = self.editor
         if editor is not None and editor.original is not None and str(editor.original.id) == str(episode_id):

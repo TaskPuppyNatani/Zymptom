@@ -6,11 +6,13 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QContextMenuEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
 from zymptom.domain import EpisodeOutcome, FunctionalEpisode, HelpLevel, ResumeAbility
+from zymptom.ui.time import to_local
 
 
 def select(combo, value):
@@ -31,6 +33,38 @@ def open_first(window, qapp):
     qapp.processEvents()
     assert window.editor is not None
     return window.editor
+
+
+def item_ids(entries):
+    return [entries.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(entries.count())
+            if entries.item(index).data(Qt.ItemDataRole.UserRole) is not None]
+
+
+def invoke_context_action(entries, item, qapp, label):
+    observed = {}
+
+    def choose():
+        try:
+            menu = qapp.activePopupWidget()
+            assert isinstance(menu, QMenu)
+            observed["actions"] = [action.text() for action in menu.actions()]
+            next(action for action in menu.actions() if action.text() == label).trigger()
+        except Exception as exc:
+            observed["error"] = exc
+
+    point = entries.visualItemRect(item).center()
+    viewport = entries.viewport()
+    QTimer.singleShot(0, choose)
+    QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=point)
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, point, viewport.mapToGlobal(point), Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(viewport, event)
+    qapp.processEvents()
+    if "error" in observed:
+        raise observed["error"]
+    assert observed["actions"] == ["Edit", "Delete…"]
 
 
 def test_main_window_initializes(window, repository):
@@ -110,6 +144,110 @@ def test_edit_refreshes_today_immediately(window, qapp, service):
     editor.save_button.click()
     assert "Changed activity" in window.entries.item(0).text()
     assert service.get(episode.id).activity == "Changed activity"
+
+
+def test_today_context_menu_edit_opens_the_episode_under_the_cursor(window, qapp, service):
+    first = service.record(activity="First attempt", outcome=EpisodeOutcome.STOPPED_EARLY, occurred_at=window.now())
+    target = service.record(activity="Target attempt", outcome=EpisodeOutcome.COMPLETED_NORMALLY, occurred_at=window.now())
+    window.refresh()
+    item = next(window.entries.item(index) for index in range(window.entries.count())
+                if window.entries.item(index).data(Qt.ItemDataRole.UserRole) == str(target.id))
+
+    invoke_context_action(window.entries, item, qapp, "Edit")
+
+    assert window.editor.original.id == target.id
+    assert service.get(first.id) == first
+    window.editor.cancel_button.click()
+
+
+def test_today_context_delete_cancel_leaves_entry_untouched(window, qapp, service):
+    episode = service.record(activity="Keep this attempt", outcome=EpisodeOutcome.STOPPED_EARLY, occurred_at=window.now())
+    window.refresh()
+    item = window.entries.item(0)
+
+    invoke_context_action(window.entries, item, qapp, "Delete…")
+
+    editor = window.editor
+    confirmation = editor.delete_confirmation
+    assert confirmation is not None and confirmation.isVisible()
+    assert episode.activity in confirmation.informativeText()
+    confirmation.button(QMessageBox.StandardButton.Cancel).click()
+    qapp.processEvents()
+    assert window.editor is editor and editor.isVisible()
+    assert service.get(episode.id) == episode
+    assert item_ids(window.entries) == [str(episode.id)]
+    editor.cancel_button.click()
+
+
+def test_today_context_delete_refreshes_today_and_history_without_losing_filters(window, qapp, service):
+    target = service.record(
+        activity="Homework target", outcome=EpisodeOutcome.STOPPED_EARLY,
+        occurred_at=window.now(), functional_demands=["sitting"],
+    )
+    survivor = service.record(
+        activity="Homework survivor", outcome=EpisodeOutcome.STOPPED_EARLY,
+        occurred_at=window.now(), functional_demands=["sitting"],
+    )
+    window.refresh()
+    window.history_button.click()
+    history = window.history
+    history.search_text.setText("Homework")
+    history.outcome.setCurrentIndex(history.outcome.findData(EpisodeOutcome.STOPPED_EARLY))
+    history.demand.setCurrentIndex(history.demand.findData("sitting"))
+    local_day = to_local(target.occurred_at, window.zone).date()
+    history.start_date.setDate(local_day)
+    history.end_date.setDate(local_day)
+    history.start_enabled.setChecked(True)
+    history.end_enabled.setChecked(True)
+    assert set(item_ids(history.entries)) == {str(target.id), str(survivor.id)}
+    filters = (
+        history.search_text.text(), history.outcome.currentData(), history.demand.currentData(),
+        history.start_enabled.isChecked(), history.end_enabled.isChecked(),
+        history.start_date.date(), history.end_date.date(),
+    )
+    window.today_button.click()
+    target_item = next(window.entries.item(index) for index in range(window.entries.count())
+                       if window.entries.item(index).data(Qt.ItemDataRole.UserRole) == str(target.id))
+
+    invoke_context_action(window.entries, target_item, qapp, "Delete…")
+
+    confirmation = window.editor.delete_confirmation
+    delete_button = next(
+        button for button in confirmation.buttons()
+        if confirmation.buttonRole(button) == QMessageBox.ButtonRole.DestructiveRole
+    )
+    delete_button.click()
+    qapp.processEvents()
+
+    assert service.get(target.id) is None
+    assert service.get(survivor.id) == survivor
+    assert item_ids(window.entries) == [str(survivor.id)]
+    assert item_ids(history.entries) == [str(survivor.id)]
+    assert (
+        history.search_text.text(), history.outcome.currentData(), history.demand.currentData(),
+        history.start_enabled.isChecked(), history.end_enabled.isChecked(),
+        history.start_date.date(), history.end_date.date(),
+    ) == filters
+    assert window.editor is None
+
+
+def test_today_non_episode_and_blank_space_context_clicks_do_nothing(window, qapp, service):
+    service.record(activity="Only episode", outcome=EpisodeOutcome.STOPPED_EARLY, occurred_at=window.now())
+    window.refresh()
+    viewport = window.entries.viewport()
+    blank = viewport.rect().bottomRight()
+    assert window.entries.itemAt(blank) is None
+
+    QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=blank)
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, blank, viewport.mapToGlobal(blank), Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(viewport, event)
+    QTest.mouseClick(window.log_button, Qt.MouseButton.RightButton)
+    qapp.processEvents()
+
+    assert window.editor is None
+    assert qapp.activePopupWidget() is None
 
 
 def test_complete_existing_episode_preserves_untouched_fields(make_editor, service, full_episode):
