@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime
 
 import pytest
@@ -47,3 +48,21 @@ def full_episode():
         created_at=datetime(2026, 10, 20, 16, tzinfo=UTC),
         updated_at=datetime(2026, 10, 20, 16, 1, tzinfo=UTC),
     )
+
+
+@pytest.fixture
+def legacy_episode(repository, connection, full_episode):
+    """Seed old duplicate child rows without using today's normalized writes."""
+    episode = deepcopy(full_episode)
+    fields = ("functional_demands", "symptoms", "adaptations", "consequences", "recovery_actions")
+    for field in fields:
+        values = getattr(episode, field)
+        values.extend([values[-1], values[0]])
+    repository.create(deepcopy(episode))
+    for field in fields:
+        connection.execute(f"DELETE FROM episode_{field} WHERE episode_id = ?", (str(episode.id),))
+        connection.executemany(
+            f"INSERT INTO episode_{field} (episode_id, position, tag) VALUES (?, ?, ?)",
+            [(str(episode.id), position, value) for position, value in enumerate(getattr(episode, field))],
+        )
+    return episode

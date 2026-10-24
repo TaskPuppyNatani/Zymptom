@@ -4,6 +4,7 @@ from uuid import UUID
 import pytest
 
 from zymptom.domain import EpisodeOutcome, FunctionalEpisode, HelpLevel, ResumeAbility, ValidationError
+from zymptom.domain.validation import unique_tags
 
 
 def make_episode(**details):
@@ -54,6 +55,18 @@ def test_collection_defaults_are_not_shared():
         getattr(first, field).append("tag")
         assert getattr(second, field) == []
     assert first.id != second.id
+
+
+def test_unique_tags_preserves_first_occurrence_and_exact_text():
+    values = ["walking", "pain", "walking", "雪 ☕", "Pain", "pain"]
+    assert unique_tags(values) == ["walking", "pain", "雪 ☕", "Pain"]
+    assert values == ["walking", "pain", "walking", "雪 ☕", "Pain", "pain"]
+
+
+@pytest.mark.parametrize("field", ["functional_demands", "symptoms", "adaptations", "consequences", "recovery_actions"])
+def test_domain_construction_keeps_legacy_duplicates_for_faithful_reads(field):
+    episode = make_episode(**{field: ["second", "first", "second"]})
+    assert getattr(episode, field) == ["second", "first", "second"]
 
 
 def test_string_values_are_converted_to_enums_and_uuid():

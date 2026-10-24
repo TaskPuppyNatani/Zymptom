@@ -72,8 +72,11 @@ are optional. A basic entry does not require expanding More details.
 **More details** exposes functional demands, symptoms and symptom notes, all
 adaptations, help and help notes, consequences, recovery actions, recovery-required
 status, resume ability, and notes. Tag controls offer common suggestions or accept
-free text. Choose/type a value and click Add; Remove selected deletes a chosen
-tag. Existing custom values, duplicates, and order are retained.
+free text. Check multiple suggestions, close the chooser, and click Add once;
+values are appended in selection order. Repeated Add attempts skip values already
+present. Remove selected deletes a chosen tag, which can then be added again at
+the end. Existing custom values and list order are retained. Older duplicate rows
+load faithfully and are reduced to their first occurrence only when saving.
 
 Quick choices share those tag collections: changed position, sat down, took break,
 and needed help are adaptations; lay down, medication, and sensory recovery are
@@ -234,8 +237,9 @@ also exposes `get`, `update`, `delete`, and `list`.
   microsecond relative to its stored value, even if the system clock moves back.
   Successful updates copy those timestamps back to the supplied object; failed
   writes leave its timestamps unchanged.
-- Five child tables store tags with explicit list positions. Order and duplicate
-  tags round-trip exactly. Foreign keys are enabled on every factory connection,
+- Five child tables store tags with explicit list positions. Writes keep unique
+  values in first-occurrence order; reads preserve any older duplicate rows.
+  Foreign keys are enabled on every factory connection,
   and deleting an episode cascades to its children.
 - Each write owns an explicit transaction covering scalars and all child rows.
   Write operations reject an already-active transaction. Reads use a consistent

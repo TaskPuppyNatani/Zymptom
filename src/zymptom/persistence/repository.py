@@ -14,6 +14,7 @@ from zymptom.domain.validation import (
     deserialize_timestamp,
     parse_id,
     serialize_timestamp,
+    unique_tags,
     validate_episode,
 )
 
@@ -57,7 +58,9 @@ class EpisodeRepository:
                 f"VALUES ({', '.join('?' for _ in SCALAR_FIELDS)})",
                 tuple(values[field] for field in SCALAR_FIELDS),
             )
-            self._insert_tags(episode)
+            tags = self._insert_tags(episode)
+        for field, field_values in tags.items():
+            setattr(episode, field, field_values)
         return episode
 
     def get(self, episode_id: UUID | str) -> FunctionalEpisode | None:
@@ -92,8 +95,10 @@ class EpisodeRepository:
             )
             for table in TAG_TABLES.values():
                 self.connection.execute(f"DELETE FROM {table} WHERE episode_id = ?", (key,))
-            self._insert_tags(episode)
-        # Do not report a new timestamp in memory unless the write committed.
+            tags = self._insert_tags(episode)
+        # Normalize the caller's tags and timestamps only after the write commits.
+        for field, field_values in tags.items():
+            setattr(episode, field, field_values)
         episode.created_at = created_at
         episode.updated_at = updated_at
         return episode
@@ -156,12 +161,14 @@ class EpisodeRepository:
         rows = self.connection.execute("SELECT DISTINCT tag FROM episode_functional_demands").fetchall()
         return sorted((row[0] for row in rows), key=lambda value: (value.casefold(), value))
 
-    def _insert_tags(self, episode: FunctionalEpisode) -> None:
+    def _insert_tags(self, episode: FunctionalEpisode) -> dict[str, list[str]]:
+        tags = {field: unique_tags(getattr(episode, field)) for field in TAG_TABLES}
         for field, table in TAG_TABLES.items():
             self.connection.executemany(
                 f"INSERT INTO {table} (episode_id, position, tag) VALUES (?, ?, ?)",
-                [(str(episode.id), position, tag) for position, tag in enumerate(getattr(episode, field))],
+                [(str(episode.id), position, tag) for position, tag in enumerate(tags[field])],
             )
+        return tags
 
     @staticmethod
     def _scalar_values(episode: FunctionalEpisode) -> dict[str, object]:

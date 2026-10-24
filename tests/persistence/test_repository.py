@@ -57,11 +57,39 @@ def test_enums_store_machine_values(repository, connection, full_episode):
 
 
 @pytest.mark.parametrize("field", ["functional_demands", "symptoms", "adaptations", "consequences", "recovery_actions"])
-def test_tags_keep_order_duplicates_and_text(repository, full_episode, field):
+def test_tag_writes_keep_first_occurrence_order_and_exact_text(repository, full_episode, field):
     values = ["z-last", "a-first", "z-last", "café ☕ 'quoted'\nnew line"]
     setattr(full_episode, field, values)
     repository.create(full_episode)
-    assert getattr(repository.get(full_episode.id), field) == values
+    expected = ["z-last", "a-first", "café ☕ 'quoted'\nnew line"]
+    assert getattr(repository.get(full_episode.id), field) == expected
+    assert getattr(full_episode, field) == expected
+    assert values == ["z-last", "a-first", "z-last", "café ☕ 'quoted'\nnew line"]
+
+
+def test_legacy_duplicates_load_without_writes_and_normalize_on_update(repository, connection, legacy_episode):
+    changes = connection.total_changes
+    loaded = repository.get(legacy_episode.id)
+    assert loaded == legacy_episode
+    assert repository.list() == [legacy_episode]
+    assert connection.total_changes == changes
+
+    repository.update(loaded)
+
+    expected = {
+        "functional_demands": ["sitting", "concentration"],
+        "symptoms": ["fatigue", "pain"],
+        "adaptations": ["changed_position", "reduced_task"],
+        "consequences": ["missed_next_activity", "needed_rest"],
+        "recovery_actions": ["lay_down", "quiet_room"],
+    }
+    for field, values in expected.items():
+        assert getattr(loaded, field) == values
+        assert [tuple(row) for row in connection.execute(
+            f"SELECT position, tag FROM episode_{field} WHERE episode_id = ? ORDER BY position",
+            (str(loaded.id),),
+        )] == list(enumerate(values))
+    assert repository.get(loaded.id) == loaded
 
 
 def test_update_round_trip_preserves_creation_and_advances_update(repository, full_episode):
@@ -176,6 +204,23 @@ def fail_on_recovery_action(connection):
             SELECT RAISE(ABORT, 'injected tag failure');
         END
     """)
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_failed_write_does_not_normalize_input(repository, connection, full_episode, operation):
+    if operation == "update":
+        repository.create(full_episode)
+    previous = repository.get(full_episode.id)
+    fail_on_recovery_action(connection)
+    full_episode.symptoms = ["pain", "fatigue", "pain"]
+    full_episode.recovery_actions = ["reject_me", "reject_me"]
+    before = deepcopy(full_episode)
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected tag failure"):
+        getattr(repository, operation)(full_episode)
+
+    assert full_episode == before
+    assert repository.get(full_episode.id) == previous
 
 
 def test_create_rolls_back_all_partial_writes(repository, connection, full_episode):

@@ -62,6 +62,11 @@ def _validate_minutes(value: int | None, field_name: str) -> None:
         raise ValidationError(f"{field_name} must be a non-negative integer or None")
 
 
+def unique_tags(values: list[str]) -> list[str]:
+    """Keep the first occurrence of each exact value, without changing order."""
+    return list(dict.fromkeys(values))
+
+
 def validate_episode(episode: "FunctionalEpisode") -> None:
     """Revalidate mutable records before writes as well as at construction."""
     if not isinstance(episode.id, UUID):
