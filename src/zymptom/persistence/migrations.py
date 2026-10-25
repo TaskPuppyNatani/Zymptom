@@ -7,7 +7,8 @@ executescript would implicitly commit a pending transaction.
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Sequence
+from pathlib import Path
+from typing import Callable, Sequence
 
 from .database import transaction
 
@@ -83,7 +84,8 @@ MIGRATIONS = (MIGRATION_001,)
 
 def apply_migrations(
     connection: sqlite3.Connection,
-    migrations: Sequence[Migration] = MIGRATIONS,
+    migrations: Sequence[Migration] | None = None,
+    *, before_migrate: Callable[[sqlite3.Connection], object] | None = None,
 ) -> int:
     """Apply pending versions in order and record them in schema_migrations.
 
@@ -91,12 +93,34 @@ def apply_migrations(
     versions or mismatched history fail explicitly, avoiding accidental downgrade.
     Existing migration definitions must never be edited after release.
     """
-    ordered = sorted(migrations, key=lambda migration: migration.version)
+    ordered = sorted(MIGRATIONS if migrations is None else migrations, key=lambda migration: migration.version)
     versions = [migration.version for migration in ordered]
     if any(type(version) is not int or version < 1 for version in versions):
         raise ValueError("Migration versions must be positive integers")
     if len(versions) != len(set(versions)):
         raise ValueError("Migration versions must be unique")
+    if connection.in_transaction:
+        raise RuntimeError("An existing transaction is already active")
+
+    # Snapshot an existing journal while the connection is idle. SQLite's backup
+    # API must never be called from inside our migration write transaction.
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'schema_migrations'").fetchone():
+        applied = [tuple(row) for row in connection.execute("SELECT version, name FROM schema_migrations ORDER BY version")]
+        if applied != [(migration.version, migration.name) for migration in ordered[:len(applied)]]:
+            raise RuntimeError("Database migration history is incompatible with this application")
+        if len(applied) == len(ordered):
+            return versions[-1] if versions else 0
+        if applied:
+            if before_migrate is not None:
+                before_migrate(connection)
+            elif ordered and ordered[0] == MIGRATION_001:
+                # Also protect callers of this lower-level migration API.
+                # Generic/non-Zymptom migration registries and in-memory test
+                # databases have no persistent Zymptom journal to snapshot.
+                from .backups import BackupStore
+                path = next(row[2] for row in connection.execute("PRAGMA database_list") if row[1] == "main")
+                if path:
+                    BackupStore(Path(path)).create(connection, "migration")
 
     with transaction(connection):
         connection.execute(

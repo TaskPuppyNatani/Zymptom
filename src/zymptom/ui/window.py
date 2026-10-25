@@ -11,25 +11,33 @@ from PySide6.QtWidgets import (
 )
 
 from zymptom.services import EpisodeService
+from zymptom.persistence.backups import BackupError
 
 from .editor import EpisodeEditor
 from .history import HistoryView
 from .episode_context_menu import connect_episode_context_menu
 from .branding import application_icon, brand_mark
 from .export_dialog import ExportDialog
+from .backup_dialog import BackupDialog
 from .labels import OUTCOMES
-from .time import to_local
+from .time import to_local, to_local_datetime
 from .widgets import comfortable
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, service: EpisodeService, *, zone: QTimeZone | None = None, now=None):
+    def __init__(self, service: EpisodeService, *, zone: QTimeZone | None = None, now=None, backup_session=None):
         super().__init__()
         self.service = service
         self.zone = zone or QTimeZone.systemTimeZone()
         self.now = now or (lambda: datetime.now(UTC))
         self.editor = None
         self.export_dialog = None
+        self.backup_session = backup_session
+        self.backup_dialog = None
+        self.backup_action = self.menuBar().addMenu("Journal").addAction("Backups / Restore…")
+        self.backup_action.setEnabled(backup_session is not None)
+        self.backup_action.triggered.connect(self.open_backup_dialog)
+        self.statusBar().setAccessibleName("Journal backup status")
         self.setWindowTitle("Zymptom — Today")
         self.setWindowIcon(application_icon())
         self.resize(640, 640)
@@ -114,9 +122,49 @@ class MainWindow(QMainWindow):
         self.day_timer = QTimer(self)
         self.day_timer.setInterval(60_000)
         self.day_timer.timeout.connect(self.refresh)
+        self.day_timer.timeout.connect(self._daily_backup)
         self.day_timer.start()
         self.refresh()
         self.log_button.setFocus()
+        if backup_session is not None:
+            QTimer.singleShot(0, self._daily_backup)
+
+    def _daily_backup(self):
+        if self.backup_session is None or self.backup_session.connection is None:
+            return
+        try:
+            info = self.backup_session.backups.daily_if_changed(
+                self.backup_session.connection, now=to_local_datetime(self.now(), self.zone),
+            )
+            if info is not None:
+                self.statusBar().showMessage("Automatic backup created and verified. " + self.backup_session.backups.warning)
+        except (BackupError, OSError, sqlite3.Error):
+            self.statusBar().showMessage("Automatic backup failed. Open Journal → Backups / Restore to retry and check the backup folder.")
+
+    def open_backup_dialog(self):
+        if self.backup_session is None:
+            return
+        if self.editor is not None or self.export_dialog is not None:
+            self.statusBar().showMessage("Finish or close the current editor or export dialog before managing backups.")
+            return
+        if self.backup_dialog is not None:
+            self.backup_dialog.raise_()
+            return
+        dialog = BackupDialog(self.backup_session, zone=self.zone, now=lambda: self.now(), parent=self)
+        self.backup_dialog = dialog
+        dialog.restored.connect(self._restored_backup)
+        dialog.finished.connect(lambda: setattr(self, "backup_dialog", None))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+
+    def _restored_backup(self):
+        self.refresh()
+        self.history.refresh()
+
+    def closeEvent(self, event):
+        if self.backup_dialog is not None:
+            self.backup_dialog.reject()
+        super().closeEvent(event)
 
     def refresh(self):
         current = to_local(self.now(), self.zone)
@@ -156,6 +204,8 @@ class MainWindow(QMainWindow):
         self.retry_button.show()
 
     def new_episode(self):
+        if self.backup_dialog is not None:
+            return
         self._open_editor()
 
     def open_episode(self, item):
@@ -207,6 +257,11 @@ class MainWindow(QMainWindow):
         self.history.refresh()
 
     def open_export_dialog(self):
+        if self.backup_dialog is not None:
+            return
+        if self.backup_session is not None and self.backup_session.connection is None:
+            self.statusBar().showMessage("The journal is unavailable. Close Zymptom and use the preserved safety backup.")
+            return
         if self.export_dialog is not None:
             self.export_dialog.raise_()
             self.export_dialog.activateWindow()
@@ -221,6 +276,11 @@ class MainWindow(QMainWindow):
         self.export_dialog = None
 
     def _open_editor(self, episode=None):
+        if self.backup_dialog is not None:
+            return
+        if self.backup_session is not None and self.backup_session.connection is None:
+            self.statusBar().showMessage("The journal is unavailable. Close Zymptom and use the preserved safety backup.")
+            return
         if self.editor is not None:
             self.editor.raise_()
             self.editor.activateWindow()
@@ -237,3 +297,4 @@ class MainWindow(QMainWindow):
     def _editor_finished(self):
         self.editor = None
         self.log_button.setFocus()
+        self._daily_backup()

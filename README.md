@@ -62,6 +62,45 @@ initialization remains available without launching Qt:
 python -m zymptom --init-db --database ./zymptom.sqlite3
 ```
 
+## Local backups and restore
+
+Open **Journal → Backups / Restore…** to create a backup immediately or select a
+verified backup to restore. The list shows local creation time, backup type, size,
+schema version, and validation status. Backup files are complete SQLite journals.
+They live in `backups/` beside the resolved journal file: normally
+`~/.local/share/Zymptom/Zymptom/backups/`, using the existing Qt/XDG data location.
+An explicit `--database` path uses its own sibling backup directory.
+
+Zymptom checks at startup, once a minute while open, and when an editor closes.
+It creates at most one daily snapshot per local calendar day, and skips later
+days until the journal differs from the previous successful daily snapshot.
+Existing file-backed journals are backed up before pending migrations; a required
+backup failure prevents the upgrade. Fresh database initialization has no prior
+journal to back up. The newest 30 verified daily/migration snapshots are retained.
+Manual and safety/pre-restore backups are kept independently and are never
+automatically pruned. A retention failure leaves the newly verified backup usable.
+
+Snapshots use the [SQLite backup API](https://www.sqlite.org/backup.html), including
+committed data in WAL files. Each snapshot is integrity-checked, checked for child
+record consistency, and checked against supported migration history and journal
+fields before it is published. Small JSON sidecars contain timestamps, identifiers,
+sizes, versions, validation results, and hashes, without journal text. If a sidecar
+is lost or damaged, the catalog reconstructs those facts from the filename and
+the validated snapshot. Snapshots and metadata are created with user-only file
+permissions and placed atomically after validation.
+
+Restore first validates and stages the selection, upgrading the staged copy only
+through supported migrations. It then creates a fresh verified safety backup and
+asks for explicit confirmation, with Cancel as the default. Finish any editor or
+export dialog before opening the backup surface. During final restoration, SQLite
+locks the journal, checks that it still matches the safety backup, and replaces
+its contents transactionally; Zymptom validates the result and reconnects its
+services. Today and History refresh while retaining History's filters. Corrupt,
+incompatible, or newer-schema snapshots are refused. A failed restore recovers
+the previous journal where storage remains usable, and always retains the safety
+backup; an unrecoverable storage/reopen failure reports its exact recovery path
+and closes the database connection.
+
 ## Daily logging
 
 Today shows only the current local calendar day, oldest first. Click **+ Log
@@ -268,8 +307,8 @@ calls so DDL does not implicitly commit through `executescript`.
 ```text
 src/zymptom/
     domain/        # Dataclass, enums, validation, timestamp conversion
-    persistence/   # SQLite connection, migrations, atomic CRUD
-    services/      # Small application-facing episode service
+    persistence/   # SQLite connection, migrations, atomic CRUD, validated backups
+    services/      # Episode API and journal/restore lifetime
     dictation/     # Temporary audio capture, local STT port/adapter, session
     ui/            # Today, editor, Qt controls, local-time boundary, app lifetime
 tests/
@@ -278,5 +317,5 @@ tests/
     ui/
 ```
 
-The journal is stored in a local SQLite file. Encryption and backup management
-are not implemented. Licensed under MIT; see `LICENSE`.
+The journal is stored in a local SQLite file. Encryption is not implemented.
+Licensed under MIT; see `LICENSE`.

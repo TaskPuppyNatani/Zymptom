@@ -8,8 +8,8 @@ from pathlib import Path
 from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from zymptom.persistence import EpisodeRepository, connect_database
-from zymptom.services import EpisodeService
+from zymptom.services.journal import JournalSession
+from zymptom.persistence.backups import BackupError
 
 from .window import MainWindow
 from .branding import application_icon
@@ -27,11 +27,14 @@ def run(database: Path | None = None) -> int:
             directory = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
             directory.mkdir(parents=True, exist_ok=True)
             database = directory / "zymptom.sqlite3"
-        connection = connect_database(database)
+        session = JournalSession(database)
+    except BackupError as exc:
+        QMessageBox.critical(None, "Required backup failed", f"The journal was not upgraded because its safety backup could not be verified.\n\n{exc}")
+        return 1
     except (sqlite3.Error, OSError, RuntimeError):
         QMessageBox.critical(None, "Could not open Zymptom", "The local journal could not be opened. Check the database location and try again.")
         return 1
-    with closing(connection):
-        window = MainWindow(EpisodeService(EpisodeRepository(connection)))
+    with closing(session):
+        window = MainWindow(session.episodes, backup_session=session)
         window.show()
         return app.exec()
