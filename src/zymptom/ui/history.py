@@ -3,6 +3,7 @@
 import sqlite3
 
 from PySide6.QtCore import QTimeZone, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget,
@@ -13,6 +14,7 @@ from zymptom.services import EpisodeService
 from .labels import FUNCTIONAL_DEMANDS, OUTCOMES
 from .episode_context_menu import connect_episode_context_menu
 from .time import local_date_bounds, to_local
+from .theme import HISTORY_DATE_TEXT
 from .widgets import comfortable
 
 
@@ -192,6 +194,7 @@ class HistoryView(QWidget):
                 font = header.font()
                 font.setBold(True)
                 header.setFont(font)
+                header.setForeground(QColor(HISTORY_DATE_TEXT))
                 self.entries.addItem(header)
                 previous_date = local.date()
             details = []

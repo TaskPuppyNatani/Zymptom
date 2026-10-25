@@ -40,7 +40,7 @@ def brand_mark(parent: QWidget) -> QWidget:
     logo.setPixmap(pixmap)
     row.addWidget(logo)
     name = QLabel("TaskPuppy Kreations")
-    name.setProperty("tone", "muted")
+    name.setProperty("role", "brand-name")
     row.addWidget(name)
     row.addStretch()
     return mark

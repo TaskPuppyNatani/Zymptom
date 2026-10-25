@@ -103,6 +103,9 @@ def test_history_reachable_loads_newest_first_and_groups_by_local_day(window, qa
                if history.entries.item(index).data(Qt.ItemDataRole.UserRole) is None]
     assert [item.text() for item in headers] == ["October 21, 2026", "October 20, 2026"]
     assert all(not item.flags() & Qt.ItemFlag.ItemIsSelectable for item in headers)
+    assert all(item.foreground().color().name() == "#c4b5fd" for item in headers)
+    assert all(item.font().bold() for item in headers)
+    assert all(item.data(Qt.ItemDataRole.ForegroundRole) is None for item in result_items(history))
     assert "11:30 PM — Grocery shopping" in result_items(history)[0].text()
     assert "Walking" in result_items(history)[0].text()
     assert "Stopped early" in result_items(history)[-1].text()

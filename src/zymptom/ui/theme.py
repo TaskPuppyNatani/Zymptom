@@ -12,6 +12,8 @@ BORDER = "#2A2A2A"
 TEXT_PRIMARY = "#FAFAFA"
 TEXT_SECONDARY = "#D6D6D6"
 TEXT_MUTED = "#AFAFAF"
+HISTORY_DATE_TEXT = "#C4B5FD"
+BRAND_TEXT = "#39FF14"
 ACCENT = "#8B5CF6"
 ACCENT_HOVER = "#A78BFA"
 ACCENT_PRESSED = "#6D28D9"
@@ -36,6 +38,7 @@ def stylesheet() -> str:
         QLabel {{ background: transparent; }}
         QLabel[tone="secondary"] {{ color: {TEXT_SECONDARY}; }}
         QLabel[tone="muted"] {{ color: {TEXT_MUTED}; }}
+        QLabel[role="brand-name"] {{ color: {BRAND_TEXT}; }}
         QLabel[role="dictation"] {{
             background: {SURFACE}; color: {TEXT_SECONDARY};
             border: 1px solid {BORDER}; border-radius: 6px; padding: 10px;
