@@ -45,6 +45,7 @@ delete = Change.build(record_id=episode.id, episode=None, device_id=UUID(int=201
                       parents=(create,), updated_at=datetime(2026, 10, 26, tzinfo=UTC), change_id=UUID(int=302))
 outputs = {
     ROOT / "src/contract/desktop-v1.json": json.dumps(reference, ensure_ascii=False, indent=2) + "\n",
+    ROOT / "src/sandbox/synthetic-v1.json": SyncBatch((create, delete)).to_json() + "\n",
     ROOT / "tests/fixtures/z5-v1.json": SyncBatch((create, delete)).to_json() + "\n",
 }
 for path, content in outputs.items():

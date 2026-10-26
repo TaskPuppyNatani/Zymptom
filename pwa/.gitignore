@@ -3,3 +3,9 @@ dist/
 test-results/
 playwright-report/
 .local-tls/
+.env.local
+.firebaserc
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log

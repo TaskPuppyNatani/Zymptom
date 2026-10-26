@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedInAs(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function uuid(value) {
+      return value is string
+        && value.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+    }
+
+    function ownsSandboxJournal(uid, journalId) {
+      let identityPath = /databases/$(database)/documents/users/$(uid)/sandbox/identity;
+      return signedInAs(uid)
+        && exists(identityPath)
+        && get(identityPath).data.owner_uid == uid
+        && get(identityPath).data.contract_version == 1
+        && get(identityPath).data.journal_id == journalId;
+    }
+
+    match /users/{uid}/sandbox/identity {
+      allow get: if signedInAs(uid);
+      allow list: if false;
+      allow create: if signedInAs(uid)
+        && request.resource.data.keys().hasAll(['owner_uid', 'journal_id', 'contract_version'])
+        && request.resource.data.keys().hasOnly(['owner_uid', 'journal_id', 'contract_version'])
+        && request.resource.data.owner_uid == uid
+        && uuid(request.resource.data.journal_id)
+        && request.resource.data.contract_version == 1;
+      allow update, delete: if false;
+    }
+
+    match /users/{uid}/journals/{journalId}/changes/{changeId} {
+      allow get, list: if ownsSandboxJournal(uid, journalId) && uuid(journalId);
+      allow create: if ownsSandboxJournal(uid, journalId)
+        && uuid(journalId)
+        && uuid(changeId)
+        && request.resource.data.keys().hasAll([
+          'owner_uid', 'journal_id', 'change_id', 'record_id', 'contract_version',
+          'record_schema_version', 'content_hash', 'canonical_payload_json', 'uploaded_at'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'owner_uid', 'journal_id', 'change_id', 'record_id', 'contract_version',
+          'record_schema_version', 'content_hash', 'canonical_payload_json', 'uploaded_at'
+        ])
+        && request.resource.data.owner_uid == uid
+        && request.resource.data.journal_id == journalId
+        && request.resource.data.change_id == changeId
+        && uuid(request.resource.data.record_id)
+        && request.resource.data.contract_version == 1
+        && request.resource.data.record_schema_version == 1
+        && request.resource.data.content_hash is string
+        && request.resource.data.content_hash.matches('^[0-9a-f]{64}$')
+        && request.resource.data.canonical_payload_json is string
+        && request.resource.data.canonical_payload_json.size() > 0
+        && request.resource.data.canonical_payload_json.size() <= 900000
+        && request.resource.data.uploaded_at == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

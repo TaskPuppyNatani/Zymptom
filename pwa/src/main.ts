@@ -3,6 +3,7 @@ import { blankEpisode, contract, localDate, localInput, occurredFromInput, tagFi
   type Episode, type EpisodeInput, type HelpLevel, type Outcome, type ResumeAbility } from './model';
 import { EpisodeStore, type LocalRecord } from './storage';
 import { TagPicker } from './tags';
+import { SandboxSyncPanel } from './sandbox/panel';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 for (const [name, value] of Object.entries(contract.palette)) {
@@ -63,7 +64,7 @@ function optionalText(control: HTMLTextAreaElement, original: string | null): st
 
 const header = el('header', undefined, 'app-header');
 const wordmark = el('div');
-wordmark.append(el('p', 'Zymptom', 'wordmark'), el('p', 'MOBILE PROOF · LOCAL ONLY', 'eyebrow'));
+wordmark.append(el('p', 'Zymptom', 'wordmark'), el('p', 'LOCAL JOURNAL · SANDBOX TRANSPORT', 'eyebrow'));
 header.append(wordmark);
 const main = el('main');
 const notice = el('p', '', 'notice');
@@ -80,10 +81,11 @@ const shellStatus = el('p', 'Offline use is available after the production shell
 shellStatus.id = 'shell-status';
 shellStatus.setAttribute('role', 'status');
 about.append(el('summary', 'About this mobile proof'),
-  el('p', 'Disposable data on this browser only. This proof does not sync with desktop Zymptom. Use test entries only.'),
+  el('p', 'Normal journal entries stay on this browser and never sync. The separate Sandbox Sync panel uses synthetic Z5 test packets only. Use test entries only.'),
   shellStatus,
   el('p', 'To install: Android browser menu → Install app. On iPhone: Share → Add to Home Screen. Installation needs HTTPS (or localhost on this computer).'));
-app.replaceChildren(header, notice, main, about, footer);
+const sandboxPanel = new SandboxSyncPanel();
+app.replaceChildren(header, notice, main, about, sandboxPanel.element, footer);
 
 let store: EpisodeStore;
 let mode: 'today' | 'editor' = 'today';
@@ -288,6 +290,7 @@ try {
   await store.deviceId();
   await today();
   void offlineShell();
+  void sandboxPanel.start(import.meta.env);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && mode === 'today') void today();
   });

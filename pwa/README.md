@@ -9,8 +9,9 @@ only this directory/build; no episode data is sent to it.
 ## Stack and local commands
 
 Vanilla TypeScript + Vite; native IndexedDB and a small generated service worker.
-There are no production library dependencies. This is enough for two screens and
-keeps the offline shell inspectable. Vitest + fake-indexeddb cover the model and
+Firebase's modular Web SDK is used only by the optional synthetic Sandbox Sync
+proof. Without Firebase configuration, the cloud panel stays unavailable and
+normal logging remains local. Vitest + fake-indexeddb cover the model and
 storage; Playwright covers the production build in Chrome at mobile sizes.
 Dependencies are pinned in `package-lock.json`. Node 22.12+ and npm are required.
 
@@ -158,7 +159,9 @@ using desktop-generated labels/colors. `tests/fixtures/z5-v1.json` is synthetic
 canonical JSON produced by Python's actual `Change`/`SyncBatch` implementation,
 including an active snapshot and its tombstone. Tests validate its episode shape,
 values, order, timestamp precision, Unicode, and null/zero/false distinctions.
-No runtime import/export feature is provided.
+The additional `src/sandbox/synthetic-v1.json` is generated from the same Python
+fixture builder for the sandbox-only transport panel. The PWA's IndexedDB
+`LocalRecord` heads are still not Z5 Changes and are never sent to Firestore.
 
 Generate or check the references without opening a journal or device config:
 
@@ -179,6 +182,90 @@ backup safety and explicit conflict handling must be integrated before any later
 transport can claim Z5 interoperability. Do not send these local wrappers to the
 Python merge API or synchronize whole IndexedDB/SQLite files.
 
+## Z5.1 Firebase Sandbox Sync
+
+**Sandbox Sync is a transport proof only.** It uploads the checked-in synthetic
+Z5 Changes from `src/sandbox/synthetic-v1.json`; it never reads or uploads normal
+IndexedDB entries. Pulled packets are validated and displayed by ID only. They
+are not applied to the local journal. Firestore stores immutable mailbox
+documents; it does not merge revisions or decide conflicts. The desktop journal
+and Python merge implementation are not connected to Firebase.
+
+### Configure a sandbox Firebase project
+
+1. Create a dedicated Firebase sandbox project and register a Web app.
+2. In Authentication, enable the Google provider. **For projects created after
+   April 28, 2025, add `localhost` under Authentication → Settings → Authorized
+   domains before testing the Android `http://localhost:4173` workflow.**
+3. Create Cloud Firestore in production/locked mode.
+4. Copy `.env.example` to `.env.local` and fill in the Web app's `apiKey`,
+   `authDomain`, `projectId`, and `appId`. `storageBucket` and
+   `messagingSenderId` are optional. These are public Web configuration values;
+   never put service-account files, private keys, OAuth client secrets, or user
+   tokens in this PWA.
+5. From `pwa/`, install the checked-in dependencies and deploy the checked-in
+   deny-by-default Rules:
+
+   ```bash
+   npm ci
+   npm exec -- firebase login
+   npm run firebase:deploy-rules -- --project YOUR_SANDBOX_PROJECT_ID
+   ```
+
+6. Run `npm run build` and `npm run preview`, or use `npm run phone:android` for
+   Android. Expand **Sandbox Sync**, sign in with Google, then use the synthetic
+   Change A / Change B controls. Signing out leaves browser-local entries intact.
+
+The Firebase config is read from ignored `pwa/.env.local`; no project-specific
+config is committed. Google sign-in uses a popup in a normal browser and a
+redirect from an installed standalone PWA. Firebase Auth restores its local
+session when supported. Firestore offline persistence is not enabled. Local CRUD
+does not wait for or depend on Auth or Firestore.
+
+The sandbox journal ID is a random opaque UUID stored at
+`users/{uid}/sandbox/identity`; the create-only identity transaction makes all
+installations for one Firebase UID discover the same journal. Change documents
+are stored under `users/{uid}/journals/{journalId}/changes/{changeId}`. Their
+`canonical_payload_json` string is authoritative; version, IDs, hash, owner, and
+server upload time are separate transport metadata. Pull validates canonical
+JSON, the v1 snapshot, and its SHA-256 hash before exposing the packet. An exact
+repeat is idempotent; a same-ID different payload is rejected. Clients cannot
+update or delete history, and no merge or apply operation exists in this panel.
+
+### Emulator verification
+
+The repository includes Firebase Auth and Firestore emulator configuration and
+Rules tests. No live Firebase project or credentials are needed:
+
+```bash
+npm run firebase:test
+```
+
+This starts Auth on port 9099 and Firestore on port 8081, runs Rules and
+transport tests, builds an emulator-configured PWA, and tests the Google popup
+flow in Chrome. To start the emulators for interactive development, run `npm run firebase:emulators` in a
+separate terminal. `npm run firebase:check` runs emulator checks, a production
+build, and desktop fixture parity. Emulator tests use the `demo-zymptom-z51`
+project ID and cannot write to a live project.
+
+### Two-device manual proof
+
+With the same sandbox `.env.local` on both installations:
+
+1. Sign Device A and Device B into the same Google account.
+2. On A, upload **Change A**. On B, pull and confirm its exact change ID.
+3. On B, upload **Change B** (the synthetic tombstone). On A, pull and confirm
+   both IDs.
+4. On B, upload Change A again; the panel should report idempotent delivery.
+   Then try **same-ID collision**; the altered valid fixture payload must be
+   rejected and the original packet must remain unchanged.
+5. Sign out, then sign in as a different Google account. Its sandbox should be
+   empty and it must not see the first account's packets.
+
+No production Firebase project or physical Android session is configured by
+these emulator tests; perform the manual proof only with the dedicated sandbox
+project and synthetic fixture data.
+
 ## Verification commands
 
 ```bash
@@ -186,6 +273,7 @@ npm test
 npm run build
 npm run check:desktop
 npm run test:e2e
+npm run firebase:test
 git diff --check
 ```
 
