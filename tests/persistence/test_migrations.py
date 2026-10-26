@@ -15,13 +15,15 @@ def test_fresh_database_creates_schema_and_records_version(connection):
     assert tables == {
         "schema_migrations", "episodes", "episode_functional_demands", "episode_symptoms",
         "episode_adaptations", "episode_consequences", "episode_recovery_actions",
+        "sync_changes", "sync_heads", "sync_conflicts", "sync_acknowledgements",
     }
-    assert schema_version(connection) == 1
+    assert schema_version(connection) == MIGRATIONS[-1].version
     history = connection.execute("SELECT version, name, applied_at FROM schema_migrations").fetchall()
-    assert len(history) == 1
+    assert len(history) == len(MIGRATIONS)
     assert history[0]["version"] == 1
     assert history[0]["name"] == "create_functional_episodes"
     assert history[0]["applied_at"].endswith("+00:00")
+    assert history[1]["version"] == 2 and history[1]["name"] == "sync_contract_v1"
 
 
 def test_reopen_skips_applied_migration_and_preserves_data(database_path, full_episode):
@@ -71,14 +73,14 @@ def test_failed_fresh_migrations_roll_back_schema_and_history(tmp_path):
 def test_failed_upgrade_preserves_existing_schema_history_and_data(connection, repository, full_episode):
     repository.create(full_episode)
     history = [tuple(row) for row in connection.execute("SELECT * FROM schema_migrations")]
-    failing = Migration(2, "broken_upgrade", (
+    failing = Migration(MIGRATIONS[-1].version + 1, "broken_upgrade", (
         "CREATE TABLE partial_upgrade (value TEXT)",
         "UPDATE episodes SET activity = 'Should roll back'",
         "INVALID SQL",
     ))
     with pytest.raises(sqlite3.OperationalError):
         apply_migrations(connection, (*MIGRATIONS, failing))
-    assert schema_version(connection) == 1
+    assert schema_version(connection) == MIGRATIONS[-1].version
     assert [tuple(row) for row in connection.execute("SELECT * FROM schema_migrations")] == history
     assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'partial_upgrade'").fetchone() is None
     assert repository.get(full_episode.id) == full_episode
@@ -89,7 +91,7 @@ def test_invalid_version_registry_rejected(connection, versions):
     invalid = tuple(Migration(version, "invalid", ()) for version in versions)
     with pytest.raises(ValueError):
         apply_migrations(connection, invalid)
-    assert schema_version(connection) == 1
+    assert schema_version(connection) == MIGRATIONS[-1].version
 
 
 def test_unknown_database_version_rejected(connection):
@@ -116,5 +118,5 @@ def test_transaction_rolls_back_even_on_interruption(connection):
 
 def test_in_memory_database_is_supported():
     with closing(connect_database(":memory:")) as connection:
-        assert schema_version(connection) == 1
+        assert schema_version(connection) == MIGRATIONS[-1].version
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1

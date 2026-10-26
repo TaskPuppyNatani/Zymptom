@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Iterator
 from uuid import UUID
@@ -45,11 +46,19 @@ class EpisodeRepository:
     Lists are oldest first, with UUID as the deterministic tie-breaker.
     """
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, *, device_id: UUID | None = None) -> None:
+        from zymptom.sync.identity import parse_device_id
         self.connection = connection
+        self._device_id = parse_device_id(device_id) if device_id is not None else None
         connection.create_function("zymptom_casefold", 1, str.casefold, deterministic=True)
 
+    @property
+    def device_id(self) -> UUID:
+        from zymptom.sync.identity import DeviceIdentity
+        return self._device_id if self._device_id is not None else DeviceIdentity().get()
+
     def create(self, episode: FunctionalEpisode) -> FunctionalEpisode:
+        from zymptom.sync.storage import track_local
         validate_episode(episode)
         values = self._scalar_values(episode)
         with transaction(self.connection):
@@ -59,6 +68,8 @@ class EpisodeRepository:
                 tuple(values[field] for field in SCALAR_FIELDS),
             )
             tags = self._insert_tags(episode)
+            track_local(self.connection, episode=replace(episode, **tags), before=None,
+                        record_id=episode.id, device_id=self.device_id, operation="create")
         for field, field_values in tags.items():
             setattr(episode, field, field_values)
         return episode
@@ -72,10 +83,12 @@ class EpisodeRepository:
             return self._load(row) if row is not None else None
 
     def update(self, episode: FunctionalEpisode) -> FunctionalEpisode:
+        from zymptom.sync.storage import track_local
         validate_episode(episode)
         values = self._scalar_values(episode)
         key = str(episode.id)
         with transaction(self.connection):
+            before = self.get(episode.id)
             previous = self.connection.execute(
                 "SELECT created_at, updated_at FROM episodes WHERE id = ?", (key,)
             ).fetchone()
@@ -96,6 +109,8 @@ class EpisodeRepository:
             for table in TAG_TABLES.values():
                 self.connection.execute(f"DELETE FROM {table} WHERE episode_id = ?", (key,))
             tags = self._insert_tags(episode)
+            track_local(self.connection, episode=replace(episode, **tags, created_at=created_at, updated_at=updated_at),
+                        before=before, record_id=episode.id, device_id=self.device_id, operation="update")
         # Normalize the caller's tags and timestamps only after the write commits.
         for field, field_values in tags.items():
             setattr(episode, field, field_values)
@@ -104,8 +119,13 @@ class EpisodeRepository:
         return episode
 
     def delete(self, episode_id: UUID | str) -> bool:
+        from zymptom.sync.storage import track_local
         key = str(parse_id(episode_id))
         with transaction(self.connection):
+            before = self.get(key)
+            if before is not None:
+                track_local(self.connection, episode=None, before=before, record_id=before.id,
+                            device_id=self.device_id, operation="delete")
             cursor = self.connection.execute("DELETE FROM episodes WHERE id = ?", (key,))
         return cursor.rowcount > 0
 
@@ -161,14 +181,33 @@ class EpisodeRepository:
         rows = self.connection.execute("SELECT DISTINCT tag FROM episode_functional_demands").fetchall()
         return sorted((row[0] for row in rows), key=lambda value: (value.casefold(), value))
 
-    def _insert_tags(self, episode: FunctionalEpisode) -> dict[str, list[str]]:
-        tags = {field: unique_tags(getattr(episode, field)) for field in TAG_TABLES}
+    def _insert_tags(self, episode: FunctionalEpisode, *, normalize: bool = True) -> dict[str, list[str]]:
+        tags = {field: unique_tags(getattr(episode, field)) if normalize else list(getattr(episode, field)) for field in TAG_TABLES}
         for field, table in TAG_TABLES.items():
             self.connection.executemany(
                 f"INSERT INTO {table} (episode_id, position, tag) VALUES (?, ?, ?)",
                 [(str(episode.id), position, tag) for position, tag in enumerate(tags[field])],
             )
         return tags
+
+    def _apply_sync_snapshot(self, record_id: UUID, episode: FunctionalEpisode | None) -> None:
+        """Apply an already validated immutable snapshot inside the merge owner."""
+        if not self.connection.in_transaction:
+            raise RuntimeError("Sync snapshots require a merge transaction")
+        if episode is not None:
+            validate_episode(episode)
+            if episode.id != record_id:
+                raise ValueError("Sync snapshot identity mismatch")
+        self.connection.execute("DELETE FROM episodes WHERE id = ?", (str(record_id),))
+        if episode is not None:
+            values = self._scalar_values(episode)
+            self.connection.execute(
+                f"INSERT INTO episodes ({', '.join(SCALAR_FIELDS)}) VALUES ({', '.join('?' for _ in SCALAR_FIELDS)})",
+                tuple(values[field] for field in SCALAR_FIELDS),
+            )
+            # Legacy snapshots may contain duplicates. Replicate faithfully;
+            # an ordinary later save still normalizes them through update().
+            self._insert_tags(episode, normalize=False)
 
     @staticmethod
     def _scalar_values(episode: FunctionalEpisode) -> dict[str, object]:

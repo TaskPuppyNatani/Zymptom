@@ -18,6 +18,7 @@ class Migration:
     version: int
     name: str
     statements: tuple[str, ...]
+    initialize: Callable[[sqlite3.Connection], None] | None = None
 
 
 MIGRATION_001 = Migration(
@@ -79,7 +80,45 @@ MIGRATION_001 = Migration(
     ),
 )
 
-MIGRATIONS = (MIGRATION_001,)
+def _seed_sync(connection):
+    from zymptom.sync.storage import seed_legacy
+    seed_legacy(connection)
+
+
+MIGRATION_002 = Migration(
+    version=2,
+    name="sync_contract_v1",
+    statements=(
+        """CREATE TABLE sync_changes (
+            change_id TEXT PRIMARY KEY NOT NULL,
+            record_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            wire_json TEXT NOT NULL
+        )""",
+        "CREATE INDEX sync_changes_by_record ON sync_changes(record_id, revision, change_id)",
+        """CREATE TABLE sync_heads (
+            record_id TEXT PRIMARY KEY NOT NULL,
+            change_id TEXT UNIQUE NOT NULL REFERENCES sync_changes(change_id)
+        )""",
+        """CREATE TABLE sync_conflicts (
+            conflict_id TEXT PRIMARY KEY NOT NULL,
+            record_id TEXT NOT NULL,
+            local_id TEXT NOT NULL REFERENCES sync_changes(change_id),
+            incoming_id TEXT NOT NULL REFERENCES sync_changes(change_id),
+            base_id TEXT REFERENCES sync_changes(change_id),
+            resolution_id TEXT REFERENCES sync_changes(change_id)
+        )""",
+        "CREATE INDEX sync_unresolved_by_record ON sync_conflicts(record_id, resolution_id)",
+        """CREATE TABLE sync_acknowledgements (
+            provider TEXT NOT NULL,
+            change_id TEXT NOT NULL REFERENCES sync_changes(change_id),
+            PRIMARY KEY(provider, change_id)
+        )""",
+    ),
+    initialize=_seed_sync,
+)
+
+MIGRATIONS = (MIGRATION_001, MIGRATION_002)
 
 
 def apply_migrations(
@@ -141,6 +180,8 @@ def apply_migrations(
         for migration in ordered[len(applied):]:
             for statement in migration.statements:
                 connection.execute(statement)
+            if migration.initialize is not None:
+                migration.initialize(connection)
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (migration.version, migration.name, datetime.now(UTC).isoformat(timespec="microseconds")),

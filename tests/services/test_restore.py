@@ -169,14 +169,15 @@ def test_supported_older_snapshot_upgrades_in_staging(journal, full_episode, mon
     journal.episodes.repository.create(full_episode)
     original = deepcopy(full_episode)
     snapshot = journal.backups.create(journal.connection)
-    upgrade = migrations.Migration(2, "test_upgrade", ("CREATE TABLE upgrade_marker (value TEXT)",))
+    current_version = migrations.MIGRATIONS[-1].version
+    upgrade = migrations.Migration(current_version + 1, "test_upgrade", ("CREATE TABLE upgrade_marker (value TEXT)",))
     monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS, upgrade))
     journal._reopen()
     journal.episodes.delete(full_episode.id)
     plan = journal.prepare_restore(snapshot.path)
-    assert journal.backups.inspect(snapshot.path).schema_version == 1
+    assert journal.backups.inspect(snapshot.path).schema_version == current_version
     journal.restore(plan)
-    assert migrations.schema_version(journal.connection) == 2
+    assert migrations.schema_version(journal.connection) == current_version + 1
     assert journal.episodes.list() == [original]
 
 

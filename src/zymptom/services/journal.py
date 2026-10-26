@@ -15,6 +15,7 @@ from zymptom.persistence.backups import (
 from zymptom.persistence.migrations import apply_migrations
 
 from .episodes import EpisodeService
+from zymptom.sync.identity import DeviceIdentity, parse_device_id
 
 
 @dataclass(frozen=True)
@@ -27,11 +28,12 @@ class RestorePlan:
 
 
 class JournalSession:
-    def __init__(self, database: Path):
+    def __init__(self, database: Path, *, device_id=None):
         self.database = Path(database).resolve()
+        self._device_id = parse_device_id(device_id) if device_id is not None else DeviceIdentity().get()
         self.backups = BackupStore(self.database)
         self.connection = connect_database(self.database)
-        self.episodes = EpisodeService(EpisodeRepository(self.connection))
+        self.episodes = EpisodeService(EpisodeRepository(self.connection, device_id=self._device_id))
         self._plan = None
 
     def close(self) -> None:
@@ -89,7 +91,7 @@ class JournalSession:
             self.connection = None
         self.connection = connect_database(self.database)
         # Keep the same application service so all views share the new repository.
-        self.episodes.repository = EpisodeRepository(self.connection)
+        self.episodes.repository = EpisodeRepository(self.connection, device_id=self._device_id)
 
     def _lock_for_restore(self) -> None:
         self.connection.execute("PRAGMA locking_mode = EXCLUSIVE")

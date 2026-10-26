@@ -101,6 +101,18 @@ the previous journal where storage remains usable, and always retains the safety
 backup; an unrecoverable storage/reopen failure reports its exact recovery path
 and closes the database connection.
 
+## Local sync contract and simulator
+
+Z5.0 maintains installation identity, immutable episode revisions, tombstones,
+provider-scoped acknowledgements, and explicit concurrent-edit conflicts locally.
+It has no network transport or account requirements. Normal offline logging is
+unchanged. The [sync contract v1](docs/sync-contract-v1.md) documents the JSON format,
+merge rules, migration, safety-backup requirement, and explicit resolution API.
+
+Run the two-device demonstration with `.venv/bin/python -m zymptom.sync.simulator`.
+It uses temporary stores only and reports convergence/conflict counts without
+printing journal contents. No synchronization or conflict-resolution UI is exposed.
+
 ## Daily logging
 
 Today shows only the current local calendar day, oldest first. Click **+ Log
@@ -291,7 +303,7 @@ also exposes `get`, `update`, `delete`, and `list`.
 
 ## Migrations
 
-`src/zymptom/persistence/migrations.py` defines `MIGRATION_001` and the ordered
+`src/zymptom/persistence/migrations.py` defines the ordered, append-only
 `MIGRATIONS` registry. Add new numbered `Migration` objects for schema changes;
 do not edit a released migration. `schema_migrations` records each applied
 version, name, and application timestamp. `schema_version(connection)` returns
@@ -309,6 +321,7 @@ src/zymptom/
     domain/        # Dataclass, enums, validation, timestamp conversion
     persistence/   # SQLite connection, migrations, atomic CRUD, validated backups
     services/      # Episode API and journal/restore lifetime
+    sync/          # Local revision contract, reconciliation, device identity, simulator
     dictation/     # Temporary audio capture, local STT port/adapter, session
     ui/            # Today, editor, Qt controls, local-time boundary, app lifetime
 tests/

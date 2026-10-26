@@ -7,6 +7,12 @@ from zymptom.domain import EpisodeOutcome, FunctionalEpisode, HelpLevel, ResumeA
 from zymptom.persistence import EpisodeRepository, connect_database
 
 
+@pytest.fixture(autouse=True)
+def isolated_installation(tmp_path, monkeypatch):
+    """No test may create installation identity/config in the real user home."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "installation-config"))
+
+
 @pytest.fixture
 def database_path(tmp_path):
     return tmp_path / "journal.sqlite3"

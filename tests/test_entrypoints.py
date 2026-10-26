@@ -6,7 +6,7 @@ import pytest
 
 from zymptom.domain import EpisodeOutcome, ValidationError
 from zymptom.persistence import connect_database
-from zymptom.persistence.migrations import schema_version
+from zymptom.persistence.migrations import MIGRATIONS, schema_version
 from zymptom.services import EpisodeService
 
 
@@ -38,9 +38,9 @@ def test_module_initializes_and_reopens_database(tmp_path):
             [sys.executable, "-m", "zymptom", "--init-db", "--database", str(database_path)],
             check=True, capture_output=True, text=True,
         )
-        assert "schema version 1" in result.stdout
+        assert f"schema version {MIGRATIONS[-1].version}" in result.stdout
     with closing(connect_database(database_path)) as connection:
-        assert schema_version(connection) == 1
+        assert schema_version(connection) == MIGRATIONS[-1].version
 
 
 def test_module_help_and_version_have_no_database_side_effects(tmp_path):

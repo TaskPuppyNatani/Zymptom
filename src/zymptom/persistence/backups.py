@@ -58,14 +58,21 @@ def content_hash(connection: sqlite3.Connection) -> str:
     """Hash a consistent logical snapshot, without storing any journal text."""
     if connection.in_transaction:
         raise BackupError("Finish the active database transaction before creating a backup.")
-    digest = hashlib.sha256()
     connection.execute("BEGIN")
     try:
-        for statement in connection.iterdump():
-            digest.update(statement.encode("utf-8"))
-            digest.update(b"\n")
+        return transaction_content_hash(connection)
     finally:
         connection.rollback()
+
+
+def transaction_content_hash(connection: sqlite3.Connection) -> str:
+    """Reuse the same fingerprint while a merge owns a stable transaction."""
+    if not connection.in_transaction:
+        raise BackupError("A consistent database transaction is required for this fingerprint.")
+    digest = hashlib.sha256()
+    for statement in connection.iterdump():
+        digest.update(statement.encode("utf-8"))
+        digest.update(b"\n")
     return digest.hexdigest()
 
 
@@ -97,6 +104,9 @@ def validate_connection(connection: sqlite3.Connection) -> tuple[int, str]:
             raise BackupError("The snapshot contains inconsistent child records.")
         connection.row_factory = sqlite3.Row
         EpisodeRepository(connection).list()
+        if history[-1][0] >= 2:
+            from zymptom.sync.storage import validate_state
+            validate_state(connection)
         return history[-1][0], content_hash(connection)
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
         raise BackupError("The snapshot is unreadable or is not a valid Zymptom journal.") from exc

@@ -12,6 +12,7 @@ from zymptom.persistence import backups, migrations
 from zymptom.persistence.backups import BackupError, BackupStore, copy_sqlite, readonly, validate_snapshot
 
 NOW = datetime(2026, 10, 25, 23, 50, tzinfo=ZoneInfo("America/Los_Angeles"))
+CURRENT_VERSION = migrations.MIGRATIONS[-1].version
 
 
 def contents(path):
@@ -30,14 +31,14 @@ def test_safe_wal_snapshot_contains_committed_episode_and_children(connection, r
         writer.execute("UPDATE episodes SET activity = 'Uncommitted'")
         info = store.create(connection, now=NOW)
         writer.rollback()
-    assert info.valid and info.schema_version == 1
+    assert info.valid and info.schema_version == CURRENT_VERSION
     assert info.size > 0 and len(info.checksum) == 64
     assert contents(info.path) == [full_episode]
     assert not info.path.with_name(info.path.name + '-wal').exists()
     assert not info.path.with_name(info.path.name + '-shm').exists()
     assert info.path.stat().st_mode & 0o777 == 0o600
     assert store.directory.stat().st_mode & 0o777 == 0o700
-    assert validate_snapshot(info.path)[0] == 1
+    assert validate_snapshot(info.path)[0] == CURRENT_VERSION
     metadata = json.loads(info.path.with_suffix(".json").read_text())
     assert metadata["validation"] == "ok" and metadata["size"] == info.size
     assert metadata["filename"] == info.path.name
@@ -219,20 +220,20 @@ def test_interrupted_sqlite_copy_rolls_back_destination(tmp_path, full_episode):
 def test_upgrade_creates_verified_snapshot_before_migrating(database_path, full_episode, monkeypatch):
     with closing(connect_database(database_path)) as original:
         EpisodeRepository(original).create(full_episode)
-    upgrade = migrations.Migration(2, "test_upgrade", ("CREATE TABLE upgrade_marker (value TEXT)",))
+    upgrade = migrations.Migration(CURRENT_VERSION + 1, "test_upgrade", ("CREATE TABLE upgrade_marker (value TEXT)",))
     monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS, upgrade))
     with closing(connect_database(database_path)) as upgraded:
-        assert migrations.schema_version(upgraded) == 2
+        assert migrations.schema_version(upgraded) == CURRENT_VERSION + 1
     snapshots = BackupStore(database_path).list()
     assert len(snapshots) == 1 and snapshots[0].kind == "migration"
-    assert snapshots[0].schema_version == 1 and snapshots[0].valid
+    assert snapshots[0].schema_version == CURRENT_VERSION and snapshots[0].valid
     assert contents(snapshots[0].path) == [full_episode]
 
 
 def test_upgrade_aborts_if_required_backup_fails(database_path, full_episode, monkeypatch):
     with closing(connect_database(database_path)) as original:
         EpisodeRepository(original).create(full_episode)
-    upgrade = migrations.Migration(2, "test_upgrade", ("DELETE FROM episodes",))
+    upgrade = migrations.Migration(CURRENT_VERSION + 1, "test_upgrade", ("DELETE FROM episodes",))
     monkeypatch.setattr(migrations, "MIGRATIONS", (*migrations.MIGRATIONS, upgrade))
 
     def fail(*args, **kwargs):
@@ -243,5 +244,5 @@ def test_upgrade_aborts_if_required_backup_fails(database_path, full_episode, mo
         connect_database(database_path)
     with closing(readonly(database_path)) as unchanged:
         unchanged.row_factory = sqlite3.Row
-        assert migrations.schema_version(unchanged) == 1
+        assert migrations.schema_version(unchanged) == CURRENT_VERSION
         assert EpisodeRepository(unchanged).list() == [full_episode]
