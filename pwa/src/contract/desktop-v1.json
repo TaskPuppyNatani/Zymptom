@@ -1,0 +1,91 @@
+{
+  "contract_version": 1,
+  "record_schema_version": 1,
+  "record_type": "functional_episode",
+  "outcomes": {
+    "completed_normally": "Completed normally",
+    "completed_with_difficulty": "Completed with difficulty",
+    "completed_with_adaptation": "Completed with adaptation",
+    "completed_with_help": "Completed with help",
+    "stopped_early": "Stopped early",
+    "unable_to_complete": "Unable to complete",
+    "avoided_due_to_limitation": "Avoided because of limitation"
+  },
+  "help_levels": {
+    "none": "No help",
+    "some": "Some help",
+    "significant": "Significant help",
+    "other_person_completed_part": "Someone else completed part",
+    "other_person_completed_all": "Someone else completed all"
+  },
+  "resume_abilities": {
+    "immediately": "Immediately",
+    "after_short_break": "After a short break",
+    "later_same_day": "Later the same day",
+    "next_day": "Next day",
+    "could_not_resume": "Could not resume",
+    "unknown": "Unknown"
+  },
+  "tags": {
+    "functional_demands": {
+      "sitting": "Sitting",
+      "standing": "Standing",
+      "walking": "Walking",
+      "lifting_carrying": "Lifting/carrying",
+      "reaching": "Reaching",
+      "bending": "Bending",
+      "fine_motor": "Fine motor",
+      "concentration": "Concentration",
+      "memory": "Memory",
+      "social_interaction": "Social interaction",
+      "sensory_tolerance": "Sensory tolerance"
+    },
+    "symptoms": {
+      "pain": "Pain",
+      "fatigue": "Fatigue",
+      "weakness": "Weakness",
+      "numbness_tingling": "Numbness/tingling",
+      "dizziness": "Dizziness",
+      "cognitive_difficulty": "Cognitive difficulty",
+      "sensory_overload": "Sensory overload",
+      "shortness_of_breath": "Shortness of breath",
+      "emotional_dysregulation": "Emotional dysregulation"
+    },
+    "adaptations": {
+      "changed_position": "Changed position",
+      "sat_down": "Sat down",
+      "took_break": "Took break",
+      "needed_help": "Needed help"
+    },
+    "consequences": {
+      "needed_rest": "Needed rest",
+      "missed_next_activity": "Missed next activity",
+      "reduced_activity": "Reduced activity afterward"
+    },
+    "recovery_actions": {
+      "lay_down": "Lay down",
+      "medication": "Medication",
+      "sensory_recovery": "Sensory recovery"
+    }
+  },
+  "palette": {
+    "BACKGROUND": "#111111",
+    "SURFACE": "#181818",
+    "SURFACE_RAISED": "#1E1E1E",
+    "BORDER": "#2A2A2A",
+    "TEXT_PRIMARY": "#FAFAFA",
+    "TEXT_SECONDARY": "#D6D6D6",
+    "TEXT_MUTED": "#AFAFAF",
+    "HISTORY_DATE_TEXT": "#C4B5FD",
+    "BRAND_TEXT": "#39FF14",
+    "ACCENT": "#8B5CF6",
+    "ACCENT_HOVER": "#A78BFA",
+    "ACCENT_PRESSED": "#6D28D9",
+    "ACCENT_SOLID": "#7440D8",
+    "ACCENT_SOLID_HOVER": "#8050E4",
+    "SELECTION": "#302340",
+    "ERROR_BACKGROUND": "#291B20",
+    "ERROR_BORDER": "#A96378",
+    "ERROR_TEXT": "#FFC1CC"
+  }
+}

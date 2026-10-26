@@ -1,0 +1,23 @@
+{
+  "name": "zymptom-pwa-m0",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22.12.0"},
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/build-sw.mjs",
+    "preview": "vite preview",
+    "phone:android": "bash scripts/test-android.sh",
+    "test": "vitest run tests/unit",
+    "test:e2e": "playwright test",
+    "check:desktop": "../.venv/bin/python scripts/desktop-fixtures.py --check"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "fake-indexeddb": "6.2.6",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

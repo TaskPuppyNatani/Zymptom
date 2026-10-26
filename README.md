@@ -103,6 +103,9 @@ and closes the database connection.
 
 ## Local sync contract and simulator
 
+The separate [PWA M0 mobile proof](pwa/README.md) uses disposable browser-local
+data only. It does not sync with or open the desktop journal.
+
 Z5.0 maintains installation identity, immutable episode revisions, tombstones,
 provider-scoped acknowledgements, and explicit concurrent-edit conflicts locally.
 It has no network transport or account requirements. Normal offline logging is
