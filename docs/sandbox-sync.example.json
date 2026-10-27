@@ -1,0 +1,6 @@
+{
+  "firebase_api_key": "PASTE_EXISTING_FIREBASE_WEB_API_KEY",
+  "firebase_project_id": "PASTE_EXISTING_FIREBASE_PROJECT_ID",
+  "google_client_id": "PASTE_DESKTOP_OAUTH_CLIENT_ID",
+  "google_client_secret": "PASTE_DESKTOP_OAUTH_CLIENT_SECRET_IF_PRESENT"
+}

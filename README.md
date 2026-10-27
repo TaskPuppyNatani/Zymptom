@@ -1,5 +1,7 @@
 # Zymptom
 
+For the explicit disposable native sync proof, see [Sandbox Sync setup](docs/sandbox-desktop-sync.md). Production desktop journal sync is not enabled.
+
 Zymptom is a local-first functional journal. Its atomic record is a
 `FunctionalEpisode`: one real-world attempt to perform an activity, including
 duration, difficulties, adaptations, help, outcome, recovery, and ability to resume.
