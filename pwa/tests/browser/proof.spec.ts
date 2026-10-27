@@ -7,7 +7,7 @@ async function ready(page: Page) {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
   expect(await page.evaluate(() => window.isSecureContext)).toBe(true);
-  await expect(page.locator('#shell-status')).toHaveText('Offline app shell ready. Entries stay on this browser.');
+  await expect(page.locator('#shell-status')).toHaveText('Offline app shell ready. Entries are stored on this browser.');
 }
 async function create(page: Page, activity = 'DEMO: Making lunch') {
   await page.getByRole('button', { name: '＋ Log Something' }).click();
@@ -181,7 +181,7 @@ test('installed standalone app preserves entries, identity and offline shell acr
     await create(page, 'DEMO: Across a browser restart');
     const ids = await page.evaluate(async () => {
       return await new Promise((resolve) => {
-        const request = indexedDB.open('zymptom-pwa-m0-disposable', 1);
+        const request = indexedDB.open('zymptom-pwa-m0-disposable');
         request.onsuccess = () => {
           const transaction = request.result.transaction(['episodes', 'installation']);
           const records = transaction.objectStore('episodes').getAll();
@@ -197,7 +197,7 @@ test('installed standalone app preserves entries, identity and offline shell acr
     await page.goto('http://localhost:4173/');
     await expect(page.getByRole('button', { name: 'Edit DEMO: Across a browser restart', exact: true })).toBeVisible();
     const restored = await page.evaluate(async () => new Promise((resolve) => {
-      const request = indexedDB.open('zymptom-pwa-m0-disposable', 1);
+      const request = indexedDB.open('zymptom-pwa-m0-disposable');
       request.onsuccess = () => {
         const transaction = request.result.transaction(['episodes', 'installation']);
         const records = transaction.objectStore('episodes').getAll();

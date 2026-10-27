@@ -1,16 +1,15 @@
 # Zymptom PWA M0
 
-A touch-first, installable **disposable mobile proof** in `pwa/`. Use synthetic
-test entries only. **It does not sync with desktop Zymptom.** It cannot open the
-desktop SQLite journal and has no journal import, backend, transport, accounts,
-remote fonts, analytics, or external runtime assets. The static server serves
-only this directory/build; no episode data is sent to it.
+A touch-first, installable **disposable mobile proof** in `pwa/`. Use test
+entries only. Manual Sandbox Sync can exchange these entries with another PWA
+installation. **It does not sync with desktop Zymptom** and cannot open its
+SQLite journal. The static preview serves only this build.
 
 ## Stack and local commands
 
 Vanilla TypeScript + Vite; native IndexedDB and a small generated service worker.
-Firebase's modular Web SDK is used only by the optional synthetic Sandbox Sync
-proof. Without Firebase configuration, the cloud panel stays unavailable and
+Firebase's modular Web SDK is used only by the optional Sandbox Sync proof.
+Without Firebase configuration, the cloud panel stays unavailable and
 normal logging remains local. Vitest + fake-indexeddb cover the model and
 storage; Playwright covers the production build in Chrome at mobile sizes.
 Dependencies are pinned in `package-lock.json`. Node 22.12+ and npm are required.
@@ -116,9 +115,10 @@ have separate browser-local data.
 
 ## Storage and safety boundary
 
-IndexedDB database **`zymptom-pwa-m0-disposable`**, version 1, is scoped to the
+IndexedDB database **`zymptom-pwa-m0-disposable`**, version 2, is scoped to the
 browser origin/profile. `episodes` holds local record heads and tombstones;
-`installation` holds one persistent random device UUID. `EpisodeStore` owns
+`changes`, `conflicts`, and `acknowledgements` hold immutable history and sync
+state; `installation` holds one persistent random device UUID. `EpisodeStore` owns
 transactions and exposes async create/update/delete/get/list methods. UI state
 is separate. A successful save waits for transaction completion, stale cross-tab
 writes are rejected, and failed writes retain the editor draft. Deletion requires
@@ -145,8 +145,9 @@ To reset development test data, open the dev-server console and run:
 await resetZymptomProof()
 ```
 
-It requires confirmation, clears only M0 episode heads/tombstones, and preserves
-the installation identity. This helper is absent from production builds. For a
+It requires confirmation, clears the disposable local entries and sync history, and preserves
+the installation identity. It does not delete cloud mailbox history, which can
+reappear on a later sync. This helper is absent from production builds. For a
 complete production-preview reset, use that test origin's browser **Clear site
 data** control; it removes both its IndexedDB and offline shell. Never use it on
 an unrelated origin. No reset can touch desktop SQLite or another browser origin.
@@ -160,8 +161,7 @@ canonical JSON produced by Python's actual `Change`/`SyncBatch` implementation,
 including an active snapshot and its tombstone. Tests validate its episode shape,
 values, order, timestamp precision, Unicode, and null/zero/false distinctions.
 The additional `src/sandbox/synthetic-v1.json` is generated from the same Python
-fixture builder for the sandbox-only transport panel. The PWA's IndexedDB
-`LocalRecord` heads are still not Z5 Changes and are never sent to Firestore.
+fixture builder for the sandbox-only transport panel.
 
 Generate or check the references without opening a journal or device config:
 
@@ -172,24 +172,29 @@ npm run check:desktop
 ../.venv/bin/python scripts/branding-icons.py
 ```
 
-Local heads carry `record_id`, `record_type`, `device_id`, `local_revision`,
-`local_change_id`, `previous_local_change_id`, `updated_at`, and `deleted`.
-**These are local edit counters/heads, not Z5 wire Changes.** M0 does not retain a
-complete immutable DAG, compute Z5 content hashes, distinguish meaningful sync
-revisions from local saves, merge conflicts, track provider acknowledgements,
-or implement backup-before-merge. Full revision history, wire validation,
-backup safety and explicit conflict handling must be integrated before any later
-transport can claim Z5 interoperability. Do not send these local wrappers to the
-Python merge API or synchronize whole IndexedDB/SQLite files.
+Local heads are materialized wrappers; only canonical immutable Changes are
+uploaded. On first opening an M0 database, each active entry becomes a single
+bootstrap create root using its existing record and local change IDs. No older
+ancestry is invented. M0 tombstones have no surviving snapshot or ancestry, so
+they remain reserved local tombstones and are not uploaded; an incoming record
+with the same ID is rejected rather than resurrected. Bootstrap is transactional
+and idempotent. This disposable browser proof does not provide desktop's backup
+before merge; browser storage is not a backup.
 
-## Z5.1 Firebase Sandbox Sync
+## Z5.2 Firebase Sandbox Sync
 
-**Sandbox Sync is a transport proof only.** It uploads the checked-in synthetic
-Z5 Changes from `src/sandbox/synthetic-v1.json`; it never reads or uploads normal
-IndexedDB entries. Pulled packets are validated and displayed by ID only. They
-are not applied to the local journal. Firestore stores immutable mailbox
-documents; it does not merge revisions or decide conflicts. The desktop journal
-and Python merge implementation are not connected to Firebase.
+**Testing only:** create disposable `DEMO:` entries, sign in to the same sandbox
+account on each PWA, and press **Sync disposable entries** on each device. Sync
+uploads canonical changes, pulls and validates the mailbox, then merges locally.
+Repeat after edits or deletes. Local logging works signed out or offline. A sync
+failure leaves local work available and can be retried. Firestore is an immutable
+mailbox; it does not decide conflicts. The PySide/SQLite journal is not connected.
+
+Concurrent edits, including delete versus edit, remain explicit conflicts; neither
+branch is silently chosen. The developer proof panel shows current candidates
+and lets you inspect and choose one. Resolution creates a revision with all
+current tips as parents; sync again to share it. Ordinary edits/deletes of a
+conflicted entry are blocked until resolution. This is not a production resolver.
 
 ### Configure a sandbox Firebase project
 
@@ -213,8 +218,8 @@ and Python merge implementation are not connected to Firebase.
    ```
 
 6. Run `npm run build` and `npm run preview`, or use `npm run phone:android` for
-   Android. Expand **Sandbox Sync**, sign in with Google, then use the synthetic
-   Change A / Change B controls. Signing out leaves browser-local entries intact.
+   Android. Expand **Sandbox Sync**, sign in with Google, and press **Sync
+   disposable entries**. Signing out leaves browser-local entries intact.
 
 The Firebase config is read from ignored `pwa/.env.local`; no project-specific
 config is committed. Google sign-in uses a popup in a normal browser and a
@@ -230,7 +235,7 @@ are stored under `users/{uid}/journals/{journalId}/changes/{changeId}`. Their
 server upload time are separate transport metadata. Pull validates canonical
 JSON, the v1 snapshot, and its SHA-256 hash before exposing the packet. An exact
 repeat is idempotent; a same-ID different payload is rejected. Clients cannot
-update or delete history, and no merge or apply operation exists in this panel.
+update or delete history. Reconciliation happens in the PWA, never in Firestore.
 
 ### Emulator verification
 
@@ -253,18 +258,16 @@ project ID and cannot write to a live project.
 With the same sandbox `.env.local` on both installations:
 
 1. Sign Device A and Device B into the same Google account.
-2. On A, upload **Change A**. On B, pull and confirm its exact change ID.
-3. On B, upload **Change B** (the synthetic tombstone). On A, pull and confirm
-   both IDs.
-4. On B, upload Change A again; the panel should report idempotent delivery.
-   Then try **same-ID collision**; the altered valid fixture payload must be
-   rejected and the original packet must remain unchanged.
-5. Sign out, then sign in as a different Google account. Its sandbox should be
-   empty and it must not see the first account's packets.
+2. Create different `DEMO:` entries on A and B. Sync A, then B, then A; both
+   should show both entries. Edit one on A, sync A and B, and check B's edit.
+3. Delete a shared entry on B, sync B and A, and check it disappears on A.
+4. On another shared entry, edit differently on both without syncing. Sync A,
+   then B, then A; inspect both candidates and explicitly choose one. Sync the
+   resolution on both devices and confirm convergence.
 
 No production Firebase project or physical Android session is configured by
 these emulator tests; perform the manual proof only with the dedicated sandbox
-project and synthetic fixture data.
+project and disposable test data.
 
 ## Verification commands
 

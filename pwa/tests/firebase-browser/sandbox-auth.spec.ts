@@ -67,3 +67,54 @@ test('Auth emulator Google sign-in restores, uploads only fixtures, and sign-out
   await expect(page.getByRole('button', { name: 'Edit DEMO: Local entry stays local', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit DEMO: Offline while sandbox signed in', exact: true })).toBeVisible();
 });
+
+test('two isolated PWA installations sync entries, preserve conflicts, resolve and propagate delete', async ({ page, browser }) => {
+  test.setTimeout(90_000);
+  const otherContext = await browser.newContext({ baseURL: 'http://localhost:4173', timezoneId: 'America/Los_Angeles' });
+  const other = await otherContext.newPage();
+  page.setDefaultTimeout(10_000);
+  other.setDefaultTimeout(10_000);
+  try {
+    const panelA = await openPanel(page);
+    const panelB = await openPanel(other);
+    await signInWithEmulator(page);
+    await signInWithEmulator(other);
+    await page.getByRole('button', { name: '＋ Log Something' }).click();
+    await page.getByLabel('What happened?', { exact: true }).fill('DEMO: Shared browser entry');
+    await page.getByLabel('Outcome', { exact: true }).selectOption('stopped_early');
+    await page.getByRole('button', { name: 'Save entry', exact: true }).click();
+    const sync = async (panel: typeof panelA) => {
+      await panel.getByRole('button', { name: 'Sync disposable entries', exact: true }).click();
+      await expect(panel.locator('.sandbox-state').nth(1)).toContainText('Sync complete.', { timeout: 15_000 });
+    };
+    await test.step('exchange the initial create', async () => { await sync(panelA); await sync(panelB); });
+    await expect(other.getByRole('button', { name: 'Edit DEMO: Shared browser entry' })).toBeVisible();
+    await test.step('make independent edits', async () => { for (const [current, notes] of [[page, 'Phone version'], [other, 'Desktop version']] as const) {
+      await current.getByRole('button', { name: 'Edit DEMO: Shared browser entry' }).click();
+      await current.getByLabel('Notes', { exact: true }).fill(notes);
+      await current.getByRole('button', { name: 'Save entry', exact: true }).click();
+    } });
+    await test.step('exchange concurrent edits', async () => { await sync(panelA); await sync(panelB); });
+    await expect(panelB.getByText('Entry needs explicit conflict resolution')).toBeVisible();
+    await expect(panelB.getByText('Unresolved conflicts: 1 · developer proof')).toBeVisible();
+    const inspect = panelB.getByText('Inspect this candidate');
+    await inspect.first().click(); await inspect.last().click();
+    await expect(panelB).toContainText('Phone version');
+    await expect(panelB).toContainText('Desktop version');
+    await panelB.getByRole('button', { name: /^Choose DEMO: Shared browser entry/ }).first().click();
+    await expect(panelB.getByText('Unresolved conflicts: 0 · developer proof')).toBeVisible();
+    await test.step('exchange the resolution', async () => { await sync(panelB); await sync(panelA); });
+    await expect(panelA.getByText('Unresolved conflicts: 0 · developer proof')).toBeVisible();
+    await other.getByRole('button', { name: 'Edit DEMO: Shared browser entry' }).click();
+    await other.getByRole('button', { name: 'Delete entry…' }).click();
+    await other.getByRole('dialog').getByRole('button', { name: 'Delete entry', exact: true }).click();
+    await test.step('exchange the tombstone', async () => { await sync(panelB); await sync(panelA); });
+    await expect(page.getByRole('button', { name: 'Edit DEMO: Shared browser entry' })).toHaveCount(0);
+    await otherContext.setOffline(true);
+    await other.getByRole('button', { name: '＋ Log Something' }).click();
+    await other.getByLabel('What happened?', { exact: true }).fill('DEMO: Offline still works');
+    await other.getByLabel('Outcome', { exact: true }).selectOption('stopped_early');
+    await other.getByRole('button', { name: 'Save entry', exact: true }).click();
+    await expect(other.getByRole('button', { name: 'Edit DEMO: Offline still works' })).toBeVisible();
+  } finally { await otherContext.close(); }
+});

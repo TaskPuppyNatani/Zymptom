@@ -81,7 +81,7 @@ const shellStatus = el('p', 'Offline use is available after the production shell
 shellStatus.id = 'shell-status';
 shellStatus.setAttribute('role', 'status');
 about.append(el('summary', 'About this mobile proof'),
-  el('p', 'Normal journal entries stay on this browser and never sync. The separate Sandbox Sync panel uses synthetic Z5 test packets only. Use test entries only.'),
+  el('p', 'Use disposable test entries only. Sandbox Sync can manually share these entries between PWA installations. The desktop journal is not connected.'),
   shellStatus,
   el('p', 'To install: Android browser menu → Install app. On iPhone: Share → Add to Home Screen. Installation needs HTTPS (or localhost on this computer).'));
 const sandboxPanel = new SandboxSyncPanel();
@@ -214,7 +214,7 @@ function editor(original?: LocalRecord): void {
         draft.recovery_minutes = recoveryMinutes.value === '' ? null : Number(recoveryMinutes.value);
         draft.resume_ability = (resume.value || null) as ResumeAbility | null;
         for (const field of tagFields) draft[field] = [...pickers.get(field)!.values];
-        if (original) await store.update(draft as Episode, original.local_revision);
+        if (original) await store.update(draft as Episode, original.local_revision, original.local_change_id);
         else await store.create(draft as EpisodeInput);
         await today('Entry saved on this browser.');
       } catch (failure) {
@@ -237,7 +237,7 @@ function confirmDelete(original: LocalRecord, error: HTMLElement): void {
   const episode = original.episode!;
   dialog.append(heading, el('p', episode.activity, 'delete-context'),
     el('p', new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'short' }).format(new Date(episode.occurred_at))),
-    el('p', 'This permanently removes this entry from the local proof.'));
+    el('p', 'This removes the entry from Today. Manual sync shares the deletion with other proof installations.'));
   const actions = el('div', undefined, 'dialog-actions');
   const cancel = button('Keep entry', () => dialog.close());
   cancel.autofocus = true;
@@ -246,7 +246,7 @@ function confirmDelete(original: LocalRecord, error: HTMLElement): void {
     busy = true;
     remove.disabled = true;
     cancel.disabled = true;
-    void store.delete(original.record_id, original.local_revision).then(async () => {
+    void store.delete(original.record_id, original.local_revision, original.local_change_id).then(async () => {
       dialog.close();
       await today('Entry deleted from this browser.');
     }).catch((failure: unknown) => {
@@ -278,7 +278,7 @@ async function offlineShell(): Promise<void> {
     if (!navigator.serviceWorker.controller) await new Promise<void>((resolve) => {
       navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true });
     });
-    shellStatus.textContent = 'Offline app shell ready. Entries stay on this browser.';
+    shellStatus.textContent = 'Offline app shell ready. Entries are stored on this browser.';
   } catch {
     shellStatus.textContent = 'Offline setup could not finish. Local entries are still available; reload online to retry the shell installation.';
   }
@@ -288,6 +288,7 @@ try {
   if (!window.isSecureContext || !crypto.randomUUID) throw new Error('Open this proof over HTTPS (or localhost). Plain HTTP on a LAN address cannot provide the installable offline proof.');
   store = await EpisodeStore.open();
   await store.deviceId();
+  sandboxPanel.attachStore(store, async () => { if (mode === 'today') await today(); });
   await today();
   void offlineShell();
   void sandboxPanel.start(import.meta.env);

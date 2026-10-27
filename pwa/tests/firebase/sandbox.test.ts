@@ -18,6 +18,10 @@ import {
 } from 'firebase/firestore';
 import { canonicalJson, makeSyntheticCollisionPayload, parseCanonicalBatch, type Z5Change } from '../../src/sandbox/z5-wire';
 import { getOrCreateSandboxJournalId, FirestoreSandboxTransport } from '../../src/sandbox/transport';
+import 'fake-indexeddb/auto';
+import { EpisodeStore } from '../../src/storage';
+import { blankEpisode } from '../../src/model';
+import { syncDisposableEntries } from '../../src/sandbox/disposable-sync';
 
 const projectId = 'demo-zymptom-z51';
 const rules = await readFile(new URL('../../firestore.rules', import.meta.url), 'utf8');
@@ -114,6 +118,27 @@ describe('Firestore Sandbox Sync security rules', () => {
 });
 
 describe('Firestore immutable transport adapter', () => {
+  it('syncs real disposable IndexedDB episodes through the emulator mailbox', async () => {
+    const db = environment.authenticatedContext('disposable-sync-user').firestore();
+    const journal = await getOrCreateSandboxJournalId(db, 'disposable-sync-user');
+    const transport = new FirestoreSandboxTransport(db, 'disposable-sync-user', journal);
+    const a = await EpisodeStore.open(crypto.randomUUID());
+    const b = await EpisodeStore.open(crypto.randomUUID());
+    try {
+      const first = await a.create({ ...blankEpisode(), activity: 'DEMO: emulator phone', outcome: 'stopped_early' });
+      await b.create({ ...blankEpisode(), activity: 'DEMO: emulator desktop', outcome: 'completed_with_difficulty' });
+      await syncDisposableEntries(a, journal, transport);
+      await syncDisposableEntries(b, journal, transport);
+      await syncDisposableEntries(a, journal, transport);
+      expect(await a.list()).toHaveLength(2);
+      expect(await b.list()).toHaveLength(2);
+      await b.delete(first.record_id, first.local_revision);
+      await syncDisposableEntries(b, journal, transport);
+      await syncDisposableEntries(a, journal, transport);
+      expect((await a.get(first.record_id))?.deleted).toBe(true);
+      expect(await a.list()).toHaveLength(1);
+    } finally { a.close(); b.close(); }
+  });
   it('resolves one same-user journal across racing installations and exchanges exact fixture packets', async () => {
     const deviceA = environment.authenticatedContext('same-user').firestore();
     const deviceB = environment.authenticatedContext('same-user').firestore();

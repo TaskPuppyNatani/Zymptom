@@ -5,6 +5,8 @@ import { completeGoogleRedirect, firebaseErrorMessage, formatSafeFirebaseAuthErr
 import { getOrCreateSandboxJournalId, FirestoreSandboxTransport, SandboxIdentityCollisionError,
   type PulledSandboxChange } from './transport';
 import { canonicalJson, makeSyntheticCollisionPayload, parseCanonicalBatch, type Z5Change } from './z5-wire';
+import type { EpisodeStore } from '../storage';
+import { syncDisposableEntries } from './disposable-sync';
 
 type PanelState = 'checking' | 'unconfigured' | 'signed-out' | 'loading-journal' | 'signed-in' | 'failed';
 
@@ -30,12 +32,13 @@ function standaloneDisplay(): boolean {
 export class SandboxSyncPanel {
   readonly element = element('details', undefined, 'sandbox-panel');
   private readonly summary = element('summary', 'Sandbox Sync · developer proof');
-  private readonly intro = element('p', 'Testing only. Cloud actions use the checked-in synthetic Z5 fixture. Normal entries stay in this browser and are never uploaded.', 'sandbox-copy');
+  private readonly intro = element('p', 'Testing only. Manual sync uploads disposable PWA entries to this sandbox account. The desktop journal is not connected.', 'sandbox-copy');
   private readonly authState = element('p', 'Checking Firebase configuration…', 'sandbox-state');
   private readonly status = element('p', '', 'sandbox-state');
   private readonly error = element('p', '', 'error-message');
   private readonly controls = element('div', undefined, 'sandbox-actions');
   private readonly packetList = element('ul', undefined, 'sandbox-packets');
+  private readonly conflictList = element('div', undefined, 'sandbox-conflicts');
   private runtime?: FirebaseRuntime;
   private transport?: FirestoreSandboxTransport;
   private user: User | null = null;
@@ -45,6 +48,8 @@ export class SandboxSyncPanel {
   private busy = false;
   private generation = 0;
   private unsubscribe?: () => void;
+  private store?: EpisodeStore;
+  private refreshToday?: () => Promise<void>;
 
   constructor() {
     this.summary.id = 'sandbox-sync-heading';
@@ -52,8 +57,58 @@ export class SandboxSyncPanel {
     this.status.setAttribute('role', 'status');
     this.error.setAttribute('role', 'alert');
     this.packetList.setAttribute('aria-label', 'Pulled sandbox packet IDs');
-    this.element.append(this.summary, this.intro, this.authState, this.status, this.error, this.controls, this.packetList);
+    this.element.append(this.summary, this.intro, this.authState, this.status, this.error, this.controls, this.conflictList, this.packetList);
     this.render();
+  }
+
+  attachStore(store: EpisodeStore, refreshToday: () => Promise<void>): void {
+    this.store = store;
+    this.refreshToday = refreshToday;
+    void this.renderConflicts();
+  }
+
+  private async renderConflicts(): Promise<void> {
+    if (!this.store) return;
+    const conflicts = await this.store.conflicts();
+    this.conflictList.replaceChildren();
+    this.conflictList.append(element('p', `Unresolved conflicts: ${conflicts.length} · developer proof`));
+    const seen = new Set<string>();
+    for (const { conflict, candidates } of conflicts) {
+      if (seen.has(conflict.recordId)) continue;
+      seen.add(conflict.recordId);
+      const section = element('section');
+      section.append(element('h3', 'Entry needs explicit conflict resolution'));
+      section.append(element('p', `Record ${conflict.recordId} · common base ${conflict.base ?? 'none'}`));
+      for (const candidate of candidates) {
+        const description = candidate.deleted ? 'Deleted entry' : candidate.episode!.activity;
+        section.append(element('p', `${description} · ${candidate.operation} · revision ${candidate.revision} · device ${candidate.device_id} · change ${candidate.change_id}`));
+        if (candidate.episode) {
+          const details = element('details');
+          details.append(element('summary', 'Inspect this candidate'), element('pre', JSON.stringify(candidate.episode, null, 2)));
+          section.append(details);
+        }
+        const choose = actionButton(`Choose ${description} · ${candidate.change_id.slice(0, 8)}`, () => {
+          void this.resolveConflict(conflict.recordId, candidate.change_id);
+        });
+        choose.disabled = this.busy;
+        section.append(choose);
+      }
+      this.conflictList.append(section);
+    }
+  }
+
+  private async resolveConflict(recordId: string, changeId: string): Promise<void> {
+    if (!this.store || this.busy) return;
+    this.busy = true;
+    this.error.textContent = '';
+    this.render();
+    try {
+      await this.store.resolve(recordId, changeId);
+      this.status.textContent = 'Conflict resolved locally. Sync again to share the resolution.';
+      await this.refreshToday?.();
+      await this.renderConflicts();
+    } catch (failure) { this.error.textContent = failure instanceof Error ? failure.message : 'Conflict resolution failed.'; }
+    finally { this.busy = false; this.render(); await this.renderConflicts(); }
   }
 
   async start(environment: FirebaseEnvironment): Promise<void> {
@@ -135,7 +190,7 @@ export class SandboxSyncPanel {
     this.render();
     try { await action(this.transport); }
     catch (failure) { this.error.textContent = firebaseErrorMessage(failure); }
-    finally { this.busy = false; this.render(); }
+    finally { this.busy = false; this.render(); await this.renderConflicts(); }
   }
 
   private render(): void {
@@ -145,6 +200,7 @@ export class SandboxSyncPanel {
       this.controls.append(actionButton('Sign out', () => { void this.perform(async () => signOutSandbox(this.runtime!.auth)); }));
       const canUseTransport = this.state === 'signed-in' && this.transport !== undefined;
       this.controls.append(
+        actionButton('Sync disposable entries', () => { void this.syncEntries(); }, 'sandbox-wide'),
         actionButton('Upload Change A · synthetic create', () => { void this.uploadFixture(0); }, 'sandbox-wide'),
         actionButton('Upload Change B · synthetic tombstone', () => { void this.uploadFixture(1); }, 'sandbox-wide'),
         actionButton('Pull sandbox packets', () => { void this.pull(); }, 'sandbox-wide'),
@@ -169,6 +225,18 @@ export class SandboxSyncPanel {
     if (this.user && this.packets.length === 0 && this.state === 'signed-in') {
       this.packetList.append(element('li', 'No packets pulled yet.'));
     }
+  }
+
+  private async syncEntries(): Promise<void> {
+    await this.perform(async (transport) => {
+      if (!this.store || !this.user) throw new Error('The disposable journal is unavailable.');
+      this.status.textContent = 'Syncing disposable entries…';
+      const provider = `firebase-sandbox:${transport.journalId}`;
+      const count = await syncDisposableEntries(this.store, provider, transport);
+      await this.refreshToday?.();
+      await this.renderConflicts();
+      this.status.textContent = `Sync complete. Checked ${count} sandbox change${count === 1 ? '' : 's'}.`;
+    });
   }
 
   private async beginSignIn(): Promise<void> {

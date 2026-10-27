@@ -1,7 +1,7 @@
 import {
   collection,
   doc,
-  getDocs,
+  getDocsFromServer,
   orderBy,
   query,
   runTransaction,
@@ -124,7 +124,7 @@ export class FirestoreSandboxTransport {
   }
 
   async pullChanges(): Promise<PulledSandboxChange[]> {
-    const snapshot = await getDocs(query(this.changeCollection(), orderBy('change_id')));
+    const snapshot = await getDocsFromServer(query(this.changeCollection(), orderBy('change_id')));
     const changes = await Promise.all(snapshot.docs.map((document) =>
       parseStoredChange(document.data(), document.id, this.uid, this.journalId)));
     return changes;

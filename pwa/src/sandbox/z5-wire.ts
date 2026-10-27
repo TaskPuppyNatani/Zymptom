@@ -95,6 +95,9 @@ async function validateChange(value: unknown): Promise<Z5Change> {
     if (value.episode.id !== value.record_id || value.episode.updated_at !== value.updated_at) {
       throw new Z5PacketError('The Z5 snapshot identity does not match its change.');
     }
+    for (const field of ['occurred_at', 'created_at', 'updated_at'] as const) {
+      if (utc(value.episode[field]) !== value.episode[field]) throw new Z5PacketError('Z5 snapshot timestamps must be canonical UTC strings.');
+    }
   }
   if (value.deleted !== (value.episode === null)) throw new Z5PacketError('The Z5 tombstone and snapshot disagree.');
   if ((value.operation === 'create' || value.operation === 'update') && value.episode === null) {
