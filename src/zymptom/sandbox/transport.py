@@ -11,7 +11,9 @@ from .auth import FirebaseSession, HttpError, request_json
 
 
 class TransportError(RuntimeError):
-    pass
+    def __init__(self, message, *, kind=None):
+        super().__init__(message)
+        self.kind = kind
 
 
 class IdentityCollision(TransportError):
@@ -184,7 +186,7 @@ class FirestoreMailbox:
 
 def _network_error(error):
     if error.status == 401:
-        return TransportError("Sandbox sign-in expired. Sign in again.")
+        return TransportError("Sandbox sign-in expired. Sign in again.", kind="auth")
     if error.status == 403:
-        return TransportError("Firebase denied the sandbox request. Local entries remain available.")
-    return TransportError("The sandbox service is unavailable. Local entries remain available; retry later.")
+        return TransportError("Firebase denied the sandbox request. Local entries remain available.", kind="permission")
+    return TransportError("The sandbox service is unavailable. Local entries remain available; retry later.", kind="offline")

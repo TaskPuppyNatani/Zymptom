@@ -41,11 +41,14 @@ From the repository root:
 .venv/bin/python -m zymptom --sandbox-sync
 ```
 
-Confirm the **SANDBOX SYNC · DISPOSABLE DATA** banner. Sign in with the same
-Google account as the Android PWA and select **Sync disposable entries**. Sync
-is manual. Conflicting changes remain separate; inspect the developer conflict
-panel, explicitly select a current candidate, and sync again to share the
+Confirm the **Sandbox Sync · Disposable Data** indicator. Open **Settings → Sync**,
+connect with the same Google account as the Android PWA and select **Sync now**.
+Sync is manual. Conflicting changes remain separate; select **Review conflict**,
+explicitly choose a version, and sync again to share the
 resolution. Local logging remains available while signed out.
+The last successful sync time is saved locally for the connected account; it
+does not contain credentials. A new local edit returns the status to Connected
+until the next sync.
 
 For the live proof, create `DEMO: Native desktop sync` on desktop, sync desktop
 then phone, and check it appears on the phone. Create `DEMO: Phone to native`

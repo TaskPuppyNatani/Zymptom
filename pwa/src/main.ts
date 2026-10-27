@@ -64,7 +64,7 @@ function optionalText(control: HTMLTextAreaElement, original: string | null): st
 
 const header = el('header', undefined, 'app-header');
 const wordmark = el('div');
-wordmark.append(el('p', 'Zymptom', 'wordmark'), el('p', 'LOCAL JOURNAL · SANDBOX TRANSPORT', 'eyebrow'));
+wordmark.append(el('p', 'Zymptom', 'wordmark'), el('p', 'DISPOSABLE SANDBOX', 'eyebrow'));
 header.append(wordmark);
 const main = el('main');
 const notice = el('p', '', 'notice');
@@ -216,6 +216,7 @@ function editor(original?: LocalRecord): void {
         for (const field of tagFields) draft[field] = [...pickers.get(field)!.values];
         if (original) await store.update(draft as Episode, original.local_revision, original.local_change_id);
         else await store.create(draft as EpisodeInput);
+        sandboxPanel.localChanged();
         await today('Entry saved on this browser.');
       } catch (failure) {
         error.textContent = failure instanceof Error ? failure.message : 'The entry could not be saved. Please retry.';
@@ -247,6 +248,7 @@ function confirmDelete(original: LocalRecord, error: HTMLElement): void {
     remove.disabled = true;
     cancel.disabled = true;
     void store.delete(original.record_id, original.local_revision, original.local_change_id).then(async () => {
+      sandboxPanel.localChanged();
       dialog.close();
       await today('Entry deleted from this browser.');
     }).catch((failure: unknown) => {

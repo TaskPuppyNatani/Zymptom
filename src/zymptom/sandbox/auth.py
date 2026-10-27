@@ -20,7 +20,9 @@ from zymptom.dictation.config import configuration_path
 
 
 class AuthError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, kind: str | None = None):
+        super().__init__(message)
+        self.kind = kind
 
 
 class HttpError(RuntimeError):
@@ -74,7 +76,7 @@ def read_config(path: Path | None = None) -> DesktopConfig:
             raise ValueError()
         return DesktopConfig(*(data[key].strip() for key in required), secret.strip())
     except (OSError, UnicodeError, ValueError, TypeError):
-        raise AuthError("Sandbox OAuth configuration is missing or invalid. See the sandbox setup instructions.") from None
+        raise AuthError("Sandbox OAuth configuration is missing or invalid. See the sandbox setup instructions.", kind="configuration") from None
 
 
 @dataclass(frozen=True)
@@ -82,10 +84,11 @@ class FirebaseSession:
     uid: str
     id_token: str = field(repr=False)
     expires_at: float = field(repr=False)
+    email: str | None = field(default=None, repr=False)
 
     def valid_token(self) -> str:
         if time.monotonic() >= self.expires_at:
-            raise AuthError("Sandbox sign-in expired. Sign in again.")
+            raise AuthError("Sandbox sign-in expired. Sign in again.", kind="auth")
         return self.id_token
 
 
@@ -97,9 +100,15 @@ def firebase_exchange(config: DesktopConfig, google_id_token: str, *, request=re
         uid, token, expires = result.get("localId"), result.get("idToken"), int(result.get("expiresIn", 0))
         if not isinstance(uid, str) or not uid or "/" in uid or not isinstance(token, str) or not token or expires <= 0:
             raise ValueError()
-        return FirebaseSession(uid, token, time.monotonic() + expires)
-    except (HttpError, ValueError, TypeError):
-        raise AuthError("Firebase sign-in failed or returned an invalid response. Local entries remain available.") from None
+        email = result.get("email")
+        if not isinstance(email, str) or len(email) > 254 or "@" not in email or any(ord(char) < 32 or ord(char) == 127 for char in email):
+            email = None
+        return FirebaseSession(uid, token, time.monotonic() + expires, email)
+    except HttpError as exc:
+        kind = "offline" if exc.status is None or exc.status >= 500 else "signin"
+        raise AuthError("Firebase sign-in failed or returned an invalid response. Local entries remain available.", kind=kind) from None
+    except (ValueError, TypeError):
+        raise AuthError("Firebase sign-in failed or returned an invalid response. Local entries remain available.", kind="signin") from None
 
 
 def authorization_url(config: DesktopConfig, redirect_uri: str, state: str, verifier: str) -> str:
@@ -177,7 +186,8 @@ def sign_in(config: DesktopConfig, *, cancel: threading.Event | None = None, tim
             if cancel.is_set():
                 raise AuthError("Google sign-in was cancelled. You can retry.")
             return firebase_exchange(config, google_token, request=request)
-    except HttpError:
-        raise AuthError("Google sign-in could not reach the authentication service. You can retry.") from None
+    except HttpError as exc:
+        kind = "offline" if exc.status is None or exc.status >= 500 else "signin"
+        raise AuthError("Google sign-in could not reach the authentication service. You can retry.", kind=kind) from None
     except OSError:
         raise AuthError("Could not start the local sign-in listener. You can retry.") from None

@@ -50,11 +50,12 @@ for (const scenario of cases) {
     });
     await page.goto('/');
     const panel = page.locator('.sandbox-panel');
-    await panel.locator('summary').click();
-    const signIn = panel.getByRole('button', { name: 'Sign in with Google', exact: true });
+    await panel.locator('#sandbox-sync-heading').click();
+    const signIn = panel.getByRole('button', { name: 'Connect with Google', exact: true });
     await expect(signIn).toBeEnabled();
     await signIn.click();
-    const alert = panel.getByRole('alert');
+    await panel.locator('.sync-developer summary').click();
+    const alert = panel.locator('.sync-developer').getByRole('alert');
     await expect(alert).toContainText(`code=${scenario.code}`);
     await expect(alert).toContainText('name=FirebaseError');
     await expect(alert).toContainText('isError=true');

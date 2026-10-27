@@ -184,14 +184,14 @@ before merge; browser storage is not a backup.
 ## Z5.2 Firebase Sandbox Sync
 
 **Testing only:** create disposable `DEMO:` entries, sign in to the same sandbox
-account on each PWA, and press **Sync disposable entries** on each device. Sync
+account on each PWA, and press **Sync now** on each device. Sync
 uploads canonical changes, pulls and validates the mailbox, then merges locally.
 Repeat after edits or deletes. Local logging works signed out or offline. A sync
 failure leaves local work available and can be retried. Firestore is an immutable
 mailbox; it does not decide conflicts. The PySide/SQLite journal is not connected.
 
 Concurrent edits, including delete versus edit, remain explicit conflicts; neither
-branch is silently chosen. The developer proof panel shows current candidates
+branch is silently chosen. **Review conflict** shows the current versions
 and lets you inspect and choose one. Resolution creates a revision with all
 current tips as parents; sync again to share it. Ordinary edits/deletes of a
 conflicted entry are blocked until resolution. This is not a production resolver.

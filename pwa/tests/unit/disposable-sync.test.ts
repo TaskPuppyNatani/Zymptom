@@ -139,6 +139,23 @@ describe('disposable Z5 history and reconciliation', () => {
     expect(await b.pending(provider)).toHaveLength(0);
   });
 
+  it('keeps new local work pending when it arrives during a sync', async () => {
+    const store = await open();
+    const box = mailbox();
+    await store.create(input('First'));
+    const delayed = {
+      ...box,
+      async pullChanges() {
+        await store.create(input('Added during sync'));
+        return box.pullChanges();
+      },
+    };
+    await syncDisposableEntries(store, provider, delayed);
+    const pending = await store.pending(provider);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].episode?.activity).toBe('Added during sync');
+  });
+
   it('rolls back a failed local transaction and rejects a stale same-generation head', async () => {
     const a = await open(); const original = await a.create(input('Unchanged'));
     const add = vi.spyOn(IDBObjectStore.prototype, 'add').mockImplementationOnce(() => { throw new Error('storage unavailable'); });
