@@ -2,16 +2,18 @@
 
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
-from PySide6.QtCore import QTimeZone, QTimer, Qt
+from PySide6.QtCore import QStandardPaths, QTimeZone, QTimer, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QButtonGroup, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from zymptom.services import EpisodeService
 from zymptom.persistence.backups import BackupError
+from zymptom.services.journal import ManualBackupError
 
 from .editor import EpisodeEditor
 from .history import HistoryView
@@ -45,7 +47,11 @@ class MainWindow(QMainWindow):
         self.sync_action = self.settings_menu.addAction("Sync…")
         self.sync_action.setEnabled(backup_session is not None)
         self.sync_action.triggered.connect(self.open_sync_dialog)
-        self.recovery_action = self.settings_menu.addMenu("Data").addAction("Import / Recover Journal…")
+        self.data_menu = self.settings_menu.addMenu("Data")
+        self.manual_backup_action = self.data_menu.addAction("Back Up Journal…")
+        self.manual_backup_action.setEnabled(backup_session is not None)
+        self.manual_backup_action.triggered.connect(self.back_up_journal)
+        self.recovery_action = self.data_menu.addAction("Import / Recover Journal…")
         self.recovery_action.setEnabled(backup_session is not None)
         self.recovery_action.triggered.connect(self.open_recovery_dialog)
         self.statusBar().setAccessibleName("Journal backup status")
@@ -174,6 +180,40 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(lambda: setattr(self, "backup_dialog", None))
         dialog.finished.connect(dialog.deleteLater)
         dialog.open()
+
+    def back_up_journal(self):
+        if self.backup_session is None or self.backup_session.connection is None:
+            return
+        if self.editor is not None or self.export_dialog is not None or self.backup_dialog is not None or self.recovery_dialog is not None or self._sync_modal_open():
+            self.statusBar().showMessage("Close the current editor or dialog before backing up the journal.")
+            return
+        documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        directory = Path(documents) if documents and Path(documents).is_dir() else Path.home()
+        filename = f"Zymptom-Journal-{to_local(self.now(), self.zone).toString('yyyy-MM-dd')}.sqlite3"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Back Up Journal", str(directory / filename), "Journal files (*.sqlite3);;All files (*)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if not path:
+            return
+        destination = Path(path)
+        overwrite = destination.exists() or destination.is_symlink()
+        if overwrite and QMessageBox.question(
+            self, "Replace existing file?", f"Replace the existing file {destination.name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.backup_session.create_manual_backup(destination, overwrite=overwrite)
+        except ManualBackupError as exc:
+            messages = {
+                "current": "Choose a different location. Zymptom cannot overwrite the journal currently in use.",
+                "verify": "The backup could not be verified, so Zymptom did not report it as successful.",
+                "exists": "A file already exists at that location. Choose another name and try again.",
+            }
+            QMessageBox.warning(self, "Backup not created", messages.get(exc.kind, "Zymptom could not create the journal backup. Check the location and try again."))
+            return
+        QMessageBox.information(self, "Journal backup", "Journal backup created successfully.")
 
     def open_recovery_dialog(self):
         if self.backup_session is None or self.backup_session.connection is None:

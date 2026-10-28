@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import os
+import tempfile
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from zymptom.domain.validation import serialize_timestamp
 from zymptom.persistence import EpisodeRepository, connect_database
 from zymptom.persistence.backups import (
     BackupError, BackupInfo, BackupStore, content_hash, copy_sqlite, file_checksum,
-    readonly, transaction_content_hash, validate_connection, validate_snapshot,
+    readonly, sync_directory, transaction_content_hash, validate_connection, validate_snapshot,
 )
 from zymptom.persistence.database import transaction
 from zymptom.persistence.migrations import apply_migrations
@@ -70,6 +71,12 @@ class RecoveryPreview:
 
 class RecoveryError(BackupError):
     def __init__(self, message: str, *, kind: str = "invalid"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class ManualBackupError(BackupError):
+    def __init__(self, message: str, *, kind: str = "write"):
         super().__init__(message)
         self.kind = kind
 
@@ -197,6 +204,68 @@ class JournalSession:
         if not info.valid:
             raise BackupError(info.error)
         return self._prepare_snapshot(info, readonly)
+
+    def create_manual_backup(self, path: Path, *, overwrite: bool = False) -> int:
+        """Publish a verified, standalone recovery-compatible snapshot at a chosen path."""
+        if self.connection is None:
+            raise ManualBackupError("The current journal is unavailable.")
+        destination = Path(path).absolute()
+
+        def check_destination():
+            protected = [self.database, *(Path(str(self.database) + suffix) for suffix in ("-wal", "-shm", "-journal"))]
+            if any(destination.resolve() == item.resolve() or
+                   (destination.exists() and item.exists() and os.path.samefile(destination, item))
+                   for item in protected):
+                raise ManualBackupError("Choose a different location.", kind="current")
+            if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+                raise ManualBackupError("Choose a regular file location.")
+            if any(Path(str(destination) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+                raise ManualBackupError("The selected file may be in use.")
+
+        temporary = None
+        try:
+            source = next(row[2] for row in self.connection.execute("PRAGMA database_list") if row[1] == "main")
+            if not source or Path(source).resolve() != self.database:
+                raise ManualBackupError("The backup connection does not belong to this journal.")
+            check_destination()
+            if destination.exists() and not overwrite:
+                raise ManualBackupError("The destination already exists.", kind="exists")
+            original = destination.stat() if destination.exists() else None
+            fd, name = tempfile.mkstemp(prefix=".zymptom-journal-", suffix=".tmp", dir=destination.parent)
+            os.close(fd)
+            temporary = Path(name)
+            with closing(sqlite3.connect(temporary, isolation_level=None)) as target:
+                copy_sqlite(self.connection, target)
+                target.execute("PRAGMA journal_mode = DELETE")
+            try:
+                preview = self.inspect_recovery(temporary)
+            except RecoveryError as exc:
+                raise ManualBackupError("The backup could not be verified.", kind="verify") from exc
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            check_destination()
+            if original is not None:
+                if not destination.exists() or destination.stat() != original:
+                    raise ManualBackupError("The destination changed while backing up.", kind="exists")
+                os.replace(temporary, destination)
+            else:
+                # Same-directory link publishes without clobbering a file that appeared meanwhile.
+                os.link(temporary, destination)
+                temporary.unlink()
+            sync_directory(destination.parent)
+            return preview.entry_count
+        except ManualBackupError:
+            raise
+        except FileExistsError as exc:
+            raise ManualBackupError("The destination already exists.", kind="exists") from exc
+        except (OSError, sqlite3.Error, BackupError, ValueError, StopIteration) as exc:
+            raise ManualBackupError("Could not create the journal backup.") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def inspect_recovery(self, path: Path) -> RecoveryPreview:
         """Inspect a closed standalone journal without writing to its files."""

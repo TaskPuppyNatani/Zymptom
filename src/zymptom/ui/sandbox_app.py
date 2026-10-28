@@ -83,6 +83,7 @@ class SandboxWindow(MainWindow):
         self.sync_state = SyncState()
         self.last_sync = None
         self.backup_action.setEnabled(False)  # Restore must never import a normal journal.
+        self.manual_backup_action.setEnabled(False)
         self.recovery_action.setEnabled(False)
         panel = QWidget(self)
         layout = QHBoxLayout(panel)
@@ -184,6 +185,9 @@ class SandboxWindow(MainWindow):
 
     def open_backup_dialog(self):
         self.statusBar().showMessage("Restore is disabled in the disposable sandbox.")
+
+    def back_up_journal(self):
+        self.statusBar().showMessage("Journal backup is disabled in the disposable sandbox.")
 
     def open_recovery_dialog(self):
         self.statusBar().showMessage("Journal recovery is disabled in the disposable sandbox.")
