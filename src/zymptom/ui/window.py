@@ -19,6 +19,7 @@ from .episode_context_menu import connect_episode_context_menu
 from .branding import application_icon, brand_mark
 from .export_dialog import ExportDialog
 from .backup_dialog import BackupDialog
+from .recovery_dialog import RecoveryDialog
 from .labels import OUTCOMES
 from .time import to_local, to_local_datetime
 from .widgets import comfortable
@@ -34,9 +35,14 @@ class MainWindow(QMainWindow):
         self.export_dialog = None
         self.backup_session = backup_session
         self.backup_dialog = None
+        self.recovery_dialog = None
         self.backup_action = self.menuBar().addMenu("Journal").addAction("Backups / Restore…")
         self.backup_action.setEnabled(backup_session is not None)
         self.backup_action.triggered.connect(self.open_backup_dialog)
+        self.settings_menu = self.menuBar().addMenu("Settings")
+        self.recovery_action = self.settings_menu.addMenu("Data").addAction("Import / Recover Journal…")
+        self.recovery_action.setEnabled(backup_session is not None)
+        self.recovery_action.triggered.connect(self.open_recovery_dialog)
         self.statusBar().setAccessibleName("Journal backup status")
         self.setWindowTitle("Zymptom — Today")
         self.setWindowIcon(application_icon())
@@ -144,7 +150,7 @@ class MainWindow(QMainWindow):
     def open_backup_dialog(self):
         if self.backup_session is None:
             return
-        if self.editor is not None or self.export_dialog is not None:
+        if self.editor is not None or self.export_dialog is not None or self.recovery_dialog is not None:
             self.statusBar().showMessage("Finish or close the current editor or export dialog before managing backups.")
             return
         if self.backup_dialog is not None:
@@ -157,6 +163,22 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(dialog.deleteLater)
         dialog.open()
 
+    def open_recovery_dialog(self):
+        if self.backup_session is None or self.backup_session.connection is None:
+            return
+        if self.editor is not None or self.export_dialog is not None or self.backup_dialog is not None:
+            self.statusBar().showMessage("Close the current editor or dialog before recovering a journal.")
+            return
+        if self.recovery_dialog is not None:
+            self.recovery_dialog.raise_()
+            return
+        dialog = RecoveryDialog(self.backup_session, zone=self.zone, parent=self)
+        self.recovery_dialog = dialog
+        dialog.recovered.connect(self._restored_backup)
+        dialog.finished.connect(lambda: setattr(self, "recovery_dialog", None))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+
     def _restored_backup(self):
         self.refresh()
         self.history.refresh()
@@ -164,6 +186,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.backup_dialog is not None:
             self.backup_dialog.reject()
+        if self.recovery_dialog is not None:
+            self.recovery_dialog.reject()
         super().closeEvent(event)
 
     def refresh(self):
@@ -204,7 +228,7 @@ class MainWindow(QMainWindow):
         self.retry_button.show()
 
     def new_episode(self):
-        if self.backup_dialog is not None:
+        if self.backup_dialog is not None or self.recovery_dialog is not None:
             return
         self._open_editor()
 
@@ -257,7 +281,7 @@ class MainWindow(QMainWindow):
         self.history.refresh()
 
     def open_export_dialog(self):
-        if self.backup_dialog is not None:
+        if self.backup_dialog is not None or self.recovery_dialog is not None:
             return
         if self.backup_session is not None and self.backup_session.connection is None:
             self.statusBar().showMessage("The journal is unavailable. Close Zymptom and use the preserved safety backup.")
@@ -276,7 +300,7 @@ class MainWindow(QMainWindow):
         self.export_dialog = None
 
     def _open_editor(self, episode=None):
-        if self.backup_dialog is not None:
+        if self.backup_dialog is not None or self.recovery_dialog is not None:
             return
         if self.backup_session is not None and self.backup_session.connection is None:
             self.statusBar().showMessage("The journal is unavailable. Close Zymptom and use the preserved safety backup.")

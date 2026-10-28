@@ -103,6 +103,16 @@ the previous journal where storage remains usable, and always retains the safety
 backup; an unrecoverable storage/reopen failure reports its exact recovery path
 and closes the database connection.
 
+To recover a separate Zymptom journal, open **Settings → Data → Import / Recover
+Journal…**. Choose a file to inspect its integrity, entry count, date range and
+version; inspection does not change it. Confirming recovery stages and upgrades a
+copy if needed, verifies a safety backup of the current journal, and uses the
+same transactional restore path. Cancel leaves the current journal unchanged.
+Close the selected journal in any other application first: files with SQLite
+sidecars (`-wal`, `-shm`, or `-journal`) are refused so the source stays untouched.
+Only supported Zymptom schemas are accepted. Journals containing sandbox sync
+acknowledgements are refused, and recovery is disabled in sandbox mode.
+
 ## Local sync contract and simulator
 
 The separate [PWA M0 mobile proof](pwa/README.md) uses disposable browser-local
