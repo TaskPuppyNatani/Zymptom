@@ -215,6 +215,8 @@ export async function initializeFirebaseRuntime(env: FirebaseEnvironment): Promi
         connectFirestoreEmulator(firestore, '127.0.0.1', 8081);
       }
       await setPersistence(auth, browserLocalPersistence);
+      // Resolve the initial persisted user before either panel derives its startup state.
+      await auth.authStateReady();
       return { auth, firestore, emulatorMode };
     })();
     pending.catch(() => runtimePromises.delete(key));

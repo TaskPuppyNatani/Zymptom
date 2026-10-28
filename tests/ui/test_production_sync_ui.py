@@ -11,9 +11,15 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QTextE
 
 from zymptom.domain import EpisodeOutcome
 from zymptom.persistence import EpisodeRepository
-from zymptom.persistence.backups import BackupError
+from zymptom.persistence.backups import BackupError, content_hash
 from zymptom.persistence.database import transaction
-from zymptom.sandbox.auth import AuthError, DesktopConfig, FirebaseSession
+from zymptom.sandbox.auth import (
+    AuthError,
+    CredentialStoreError,
+    DesktopConfig,
+    FirebaseSession,
+    MemoryCredentialStore,
+)
 from zymptom.sandbox.transport import FirestoreMailbox, TransportError
 from zymptom.services.journal import JournalSession, production_provider
 from zymptom.sync.contract import SyncError
@@ -477,3 +483,478 @@ def test_production_sync_ui_conflict_review_and_resolution(qapp, zone, tmp_path,
             window.close()
         desktop_a.close()
         desktop_b.close()
+
+
+def test_reopening_desktop_restores_connected_sync_state_without_oauth_or_automatic_sync(
+    qapp, zone, tmp_path, full_episode, monkeypatch
+):
+    from zymptom.ui import sync_dialog as sync_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    store = MemoryCredentialStore()
+    fake = FakeProductionFirestore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    insert_untracked(session.connection, deepcopy(full_episode))
+    enrollment = session.enroll_sync()
+    fixed_now = datetime(2026, 10, 27, 19, 30, tzinfo=timezone.utc)
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+
+    def mailbox_factory(cfg, auth, journal_id):
+        return FirestoreMailbox(cfg.firebase_project_id, auth, request=fake, journal_id=journal_id)
+
+    window1 = MainWindow(
+        session.episodes,
+        zone=zone,
+        now=lambda: fixed_now,
+        backup_session=session,
+        credential_store=store,
+    )
+    window2 = None
+    try:
+        window1.open_sync_dialog()
+        dialog1 = window1.sync_dialog
+        dialog1.mailbox_factory = mailbox_factory
+        dialog1.config = config
+        dialog1._signed_in(
+            FirebaseSession(
+                uid="prod-user-1",
+                id_token="initial-jwt",
+                expires_at=time.monotonic() + 3600,
+                email="user@example.test",
+                refresh_token="persisted-refresh-token-1",
+            )
+        )
+        dialog1.start_sync_button.click()
+        qapp.processEvents()
+        assert dialog1.state_label.text() == "Up to date"
+        assert len(fake.documents) == 1
+        dialog1.reject()
+        window1.close()
+        qapp.processEvents()
+
+        # Reopen a new MainWindow instance (simulating closing and reopening Zymptom)
+        oauth_calls = []
+        monkeypatch.setattr(
+            sync_module,
+            "sign_in",
+            lambda *_a, **_kw: oauth_calls.append(1) or (_ for _ in ()).throw(AssertionError("OAuth must not run")),
+        )
+        uploads_before_reopen = fake.uploads_attempted
+        journal_before_reopen = content_hash(session.connection)
+
+        window2 = MainWindow(
+            session.episodes,
+            zone=zone,
+            now=lambda: fixed_now,
+            backup_session=session,
+            credential_store=store,
+        )
+        qapp.processEvents()
+
+        # Startup must restore auth state without triggering any automatic sync
+        assert window2._sync_auth is not None
+        assert window2._sync_auth.uid == "prod-user-1"
+        assert window2._sync_auth.email == "user@example.test"
+        assert fake.uploads_attempted == uploads_before_reopen
+        assert content_hash(session.connection) == journal_before_reopen
+
+        # Opening Settings -> Sync shows Connected immediately without running OAuth or automatic sync
+        window2.open_sync_dialog()
+        dialog2 = window2.sync_dialog
+        dialog2.mailbox_factory = mailbox_factory
+        assert oauth_calls == []
+        assert fake.uploads_attempted == uploads_before_reopen
+        assert content_hash(session.connection) == journal_before_reopen
+        assert dialog2.state_label.text() == "Connected"
+        assert dialog2.account_label.text() == "Google account: user@example.test"
+        assert dialog2.last_sync_label.text() == "Last synced: Oct 27, 2026 · 12:30 PM"
+        assert dialog2.sync_button.isEnabled()
+        assert not dialog2.sync_button.isHidden()
+        assert dialog2.start_sync_button.isHidden()
+        assert not dialog2.signin.isEnabled()
+        assert dialog2.signout.isEnabled()
+    finally:
+        if window1.sync_dialog:
+            window1.sync_dialog.reject()
+        window1.close()
+        if window2 is not None:
+            if window2.sync_dialog:
+                window2.sync_dialog.reject()
+            window2.close()
+        session.close()
+
+
+def test_restored_desktop_ui_session_refreshes_expired_token_on_manual_sync_now(
+    qapp, zone, tmp_path, full_episode, monkeypatch
+):
+    from zymptom.sandbox import auth as auth_module
+    from zymptom.ui import sync_dialog as sync_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    store = MemoryCredentialStore()
+    fake = FakeProductionFirestore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    insert_untracked(session.connection, deepcopy(full_episode))
+    enrollment = session.enroll_sync()
+    fixed_now = datetime(2026, 10, 27, 19, 30, tzinfo=timezone.utc)
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+
+    refresh_requests = []
+
+    def fake_auth_request(url, *, data=None, headers=None):
+        refresh_requests.append(url)
+        return {
+            "user_id": "prod-user-1",
+            "id_token": "fresh-id-token-after-reopen",
+            "refresh_token": "rotated-refresh-token-2",
+            "expires_in": "3600",
+        }
+
+    monkeypatch.setattr(auth_module, "request_json", fake_auth_request)
+
+    def mailbox_factory(cfg, auth, journal_id):
+        def check_token_and_forward(url, *, headers, data=None):
+            assert headers["Authorization"] == "Bearer fresh-id-token-after-reopen"
+            return fake(url, headers=headers, data=data)
+
+        return FirestoreMailbox(
+            cfg.firebase_project_id,
+            auth,
+            request=check_token_and_forward,
+            journal_id=journal_id,
+        )
+
+    auth_module.save_persisted_session(
+        config,
+        FirebaseSession(
+            uid="prod-user-1",
+            id_token="expired-jwt",
+            expires_at=0.0,
+            email="user@example.test",
+            refresh_token="initial-refresh-token-1",
+        ),
+        scope="production",
+        journal_id=enrollment.journal_id,
+        store=store,
+    )
+    # Mark initial sync already completed
+    initial_box = FirestoreMailbox(
+        "demo-project",
+        make_auth(token="initial-jwt"),
+        request=fake,
+        journal_id=enrollment.journal_id,
+    )
+    session.sync_production(initial_box, approve_first_sync=True)
+    added = session.episodes.record(activity="Logged after reopen", outcome=EpisodeOutcome.STOPPED_EARLY)
+
+    window = MainWindow(
+        session.episodes,
+        zone=zone,
+        now=lambda: fixed_now,
+        backup_session=session,
+        credential_store=store,
+    )
+    try:
+        assert refresh_requests == []
+        window.open_sync_dialog()
+        dialog = window.sync_dialog
+        dialog.mailbox_factory = mailbox_factory
+        assert dialog.state_label.text() == "Connected"
+        assert dialog.sync_button.isEnabled()
+
+        dialog.sync_button.click()
+        qapp.processEvents()
+
+        assert len(refresh_requests) == 1
+        assert dialog.state_label.text() == "Up to date"
+        assert len(fake.documents) == 2
+        assert session.episodes.get(added.id) is not None
+    finally:
+        if window.sync_dialog:
+            window.sync_dialog.reject()
+        window.close()
+        session.close()
+
+
+def test_explicit_disconnect_persists_signed_out_state_across_desktop_reopen_while_preserving_journal(
+    qapp, zone, tmp_path, full_episode, monkeypatch
+):
+    from zymptom.ui import sync_dialog as sync_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    store = MemoryCredentialStore()
+    fake = FakeProductionFirestore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    insert_untracked(session.connection, deepcopy(full_episode))
+    enrollment = session.enroll_sync()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+
+    def mailbox_factory(cfg, auth, journal_id):
+        return FirestoreMailbox(cfg.firebase_project_id, auth, request=fake, journal_id=journal_id)
+
+    window1 = MainWindow(session.episodes, zone=zone, backup_session=session, credential_store=store)
+    window2 = None
+    try:
+        window1.open_sync_dialog()
+        dialog1 = window1.sync_dialog
+        dialog1.mailbox_factory = mailbox_factory
+        dialog1.config = config
+        dialog1._signed_in(
+            FirebaseSession(
+                uid="prod-user-1",
+                id_token="jwt-1",
+                expires_at=time.monotonic() + 3600,
+                email="user@example.test",
+                refresh_token="refresh-1",
+            )
+        )
+        dialog1.start_sync_button.click()
+        qapp.processEvents()
+        assert store.load("production", "demo-project", str(enrollment.journal_id)) is not None
+
+        provider = production_provider(enrollment.journal_id)
+        acks_before = acknowledged_changes(session.connection, provider)
+        changes_before = read_changes(session.connection)
+
+        # Explicit Disconnect clears stored credential
+        dialog1.signout.click()
+        qapp.processEvents()
+        assert store.load("production", "demo-project", str(enrollment.journal_id)) is None
+        dialog1.reject()
+        window1.close()
+
+        # Reopening Zymptom remains signed out while preserving journal data, journal_id, Changes, and acks
+        window2 = MainWindow(session.episodes, zone=zone, backup_session=session, credential_store=store)
+        assert window2._sync_auth is None
+        window2.open_sync_dialog()
+        dialog2 = window2.sync_dialog
+        assert dialog2.auth is None
+        assert dialog2.state_label.text() in {"Not connected", "Journal ready for sync"}
+        assert dialog2.signin.isEnabled()
+        assert not dialog2.sync_button.isEnabled()
+        assert not dialog2.signout.isEnabled()
+        assert session.journal_id == enrollment.journal_id
+        assert acknowledged_changes(session.connection, provider) == acks_before
+        assert read_changes(session.connection) == changes_before
+        assert len(session.episodes.list()) == 1
+    finally:
+        if window1.sync_dialog:
+            window1.sync_dialog.reject()
+        window1.close()
+        if window2 is not None:
+            if window2.sync_dialog:
+                window2.sync_dialog.reject()
+            window2.close()
+        session.close()
+
+
+def test_credential_store_unavailable_falls_back_safely_in_ui_without_plaintext_secrets(
+    qapp, zone, tmp_path, full_episode, monkeypatch
+):
+    from zymptom.ui import sync_dialog as sync_module
+
+    config_root = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+
+    class UnavailableCredentialStore:
+        def load(self, *_args):
+            raise CredentialStoreError("System credential store is unavailable on this session.")
+
+        def save(self, *_args):
+            raise CredentialStoreError("System credential store is unavailable on this session.")
+
+        def delete(self, *_args):
+            raise CredentialStoreError("System credential store is unavailable on this session.")
+
+    fake = FakeProductionFirestore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    insert_untracked(session.connection, deepcopy(full_episode))
+    session.enroll_sync()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+
+    def mailbox_factory(cfg, auth, journal_id):
+        return FirestoreMailbox(cfg.firebase_project_id, auth, request=fake, journal_id=journal_id)
+
+    window = MainWindow(
+        session.episodes,
+        zone=zone,
+        backup_session=session,
+        credential_store=UnavailableCredentialStore(),
+    )
+    try:
+        window.open_sync_dialog()
+        dialog = window.sync_dialog
+        dialog.mailbox_factory = mailbox_factory
+        assert dialog.state_label.text() in {"Not connected", "Journal ready for sync"}
+        assert "Persistent sign-in is unavailable" in dialog.status.text()
+        assert "secret" not in dialog.status.text().lower()
+
+        # Interactive sign-in and manual sync still succeed for the current session
+        dialog.config = config
+        dialog._signed_in(
+            FirebaseSession(
+                uid="prod-user-1",
+                id_token="in-memory-jwt-secret",
+                expires_at=time.monotonic() + 3600,
+                email="user@example.test",
+                refresh_token="in-memory-refresh-secret",
+            )
+        )
+        assert dialog.state_label.text() == "Connected"
+        assert "Persistent sign-in is unavailable" in dialog.status.text()
+
+        dialog.start_sync_button.click()
+        qapp.processEvents()
+        assert dialog.state_label.text() == "Up to date"
+        assert len(fake.documents) == 1
+
+        # Verify no plaintext secret was written to any file under tmp_path
+        for path in tmp_path.rglob("*"):
+            if path.is_file():
+                text = path.read_bytes().decode("utf-8", errors="ignore")
+                assert "in-memory-jwt-secret" not in text
+                assert "in-memory-refresh-secret" not in text
+    finally:
+        if window.sync_dialog:
+            window.sync_dialog.reject()
+        window.close()
+        session.close()
+
+
+def test_disconnect_failure_keeps_session_and_reports_that_credential_was_not_removed(qapp, zone, tmp_path, monkeypatch):
+    from zymptom.ui import sync_dialog as sync_module
+
+    class DeleteFailStore(MemoryCredentialStore):
+        def delete(self, *_args):
+            raise CredentialStoreError("private credential details")
+
+    store = DeleteFailStore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    enrollment = session.enroll_sync()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+    window = MainWindow(session.episodes, zone=zone, backup_session=session, credential_store=store)
+    try:
+        window.open_sync_dialog()
+        dialog = window.sync_dialog
+        auth = FirebaseSession("prod-user-1", "short-token", time.monotonic() + 3600,
+                               refresh_token="private-refresh-token")
+        dialog.config = config
+        dialog._signed_in(auth)
+        dialog.signout.click()
+        assert dialog.auth is auth and window._sync_auth is auth
+        assert store.load("production", "demo-project", str(enrollment.journal_id)) is not None
+        assert "Could not remove" in dialog.status.text()
+        assert "private credential details" not in dialog.status.text()
+    finally:
+        if window.sync_dialog:
+            window.sync_dialog.reject()
+        window.close()
+        session.close()
+
+
+def test_interactive_session_refreshes_its_token_during_later_manual_sync(qapp, zone, tmp_path, monkeypatch):
+    from zymptom.sandbox import auth as auth_module
+    from zymptom.ui import sync_dialog as sync_module
+
+    store = MemoryCredentialStore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    session.enroll_sync()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+    refreshes = []
+    def refresh(_url, **_kwargs):
+        refreshes.append(True)
+        return {"user_id": "prod-user-1", "id_token": "new-id-token",
+                "refresh_token": "new-refresh-token", "expires_in": "3600"}
+    monkeypatch.setattr(auth_module, "request_json", refresh)
+    fake = FakeProductionFirestore()
+    window = MainWindow(session.episodes, zone=zone, backup_session=session, credential_store=store)
+    try:
+        window.open_sync_dialog()
+        dialog = window.sync_dialog
+        dialog.config = config
+        auth = FirebaseSession("prod-user-1", "old-id-token", time.monotonic() + 3600,
+                               refresh_token="old-refresh-token")
+        dialog._signed_in(auth)
+        assert refreshes == []
+        object.__setattr__(auth, "expires_at", 0.0)
+        dialog.mailbox_factory = lambda cfg, current, journal_id: FirestoreMailbox(
+            cfg.firebase_project_id, current, request=fake, journal_id=journal_id,
+        )
+        dialog.start_sync_button.click()
+        assert refreshes == [True] and auth.id_token == "new-id-token"
+        assert dialog.state_label.text() == "Up to date"
+    finally:
+        if window.sync_dialog:
+            window.sync_dialog.reject()
+        window.close()
+        session.close()
+
+
+def test_revoked_restored_credential_during_sync_now_shows_not_connected(
+    qapp, zone, tmp_path, full_episode, monkeypatch
+):
+    from zymptom.sandbox import auth as auth_module
+    from zymptom.ui import sync_dialog as sync_module
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    store = MemoryCredentialStore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    insert_untracked(session.connection, deepcopy(full_episode))
+    enrollment = session.enroll_sync()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    monkeypatch.setattr(sync_module, "read_config", lambda: config)
+
+    # Mark initial sync done and save a credential that will fail refresh on Sync now
+    fake = FakeProductionFirestore()
+    initial_box = FirestoreMailbox("demo-project", make_auth(), request=fake, journal_id=enrollment.journal_id)
+    session.sync_production(initial_box, approve_first_sync=True)
+
+    auth_module.save_persisted_session(
+        config,
+        FirebaseSession(
+            uid="prod-user-1",
+            id_token="",
+            expires_at=0.0,
+            email="user@example.test",
+            refresh_token="revoked-refresh-token-xyz",
+        ),
+        scope="production",
+        journal_id=enrollment.journal_id,
+        store=store,
+    )
+    monkeypatch.setattr(
+        auth_module,
+        "request_json",
+        lambda *_a, **_kw: (_ for _ in ()).throw(auth_module.HttpError(400)),
+    )
+
+    window = MainWindow(session.episodes, zone=zone, backup_session=session, credential_store=store)
+    try:
+        window.open_sync_dialog()
+        dialog = window.sync_dialog
+        assert dialog.state_label.text() == "Connected"
+
+        dialog.sync_button.click()
+        qapp.processEvents()
+
+        assert dialog.state_label.text() == "Not connected"
+        assert "connection expired" in dialog.status.text()
+        assert "revoked-refresh-token-xyz" not in dialog.status.text()
+        assert dialog.auth is None
+        assert window._sync_auth is None
+        assert (
+            store.load("production", "demo-project", str(enrollment.journal_id))
+            is not None
+        )
+        assert len(session.episodes.list()) == 1
+    finally:
+        if window.sync_dialog:
+            window.sync_dialog.reject()
+        window.close()
+        session.close()

@@ -809,4 +809,48 @@ describe('Installed PWA Google authentication lifecycle and panel coordination',
     expect(root.allText()).toContain('Connected with Google · owner@example.test');
     expect(root.findButton('Join existing journal')?.disabled).toBe(false);
   });
+
+  it('restores a joined journal without sign-in or sync and stays signed out after disconnect', async () => {
+    const cloud = createFakeCloud();
+    cloud.publishDescriptor(ownerUid, journalA);
+    const store = await openStore();
+    await store.joinProductionJournal(journalA, [], productionProvider(journalA));
+    await store.create(makeInput('Unsynced local entry'));
+    const before = await store.pending(productionProvider(journalA));
+    const mailbox = cloud.mailboxFor(ownerUid, journalA);
+    const upload = vi.spyOn(mailbox, 'uploadCanonicalChange');
+    const pull = vi.spyOn(mailbox, 'pullChanges');
+    const signIn = vi.fn(async () => user);
+    const harness = createSharedAuthHarness(user);
+    const signOut = vi.fn(async () => { harness.emitUser(null); });
+    const deps = {
+      ...cloud.deps(), initRuntime: async () => harness.runtime,
+      observeAuth: harness.observeAuth, completeRedirect: async () => null, signIn, signOut,
+    };
+    const panel = new ProductionSyncPanel(deps);
+    await panel.attachStore(store, async () => {});
+    await panel.start({ VITE_FIREBASE_PROJECT_ID: 'demo' });
+    expect((panel.element as unknown as FakeElement).allText()).toContain('Connected');
+    expect((panel.element as unknown as FakeElement).findButton('Sync now')?.disabled).toBe(false);
+    expect(await store.journalId()).toBe(journalA);
+    expect(signIn).not.toHaveBeenCalled();
+    expect(signOut).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+    expect(pull).not.toHaveBeenCalled();
+    expect(await store.pending(productionProvider(journalA))).toEqual(before);
+
+    await panel.disconnect();
+    panel.dispose();
+    expect(signOut).toHaveBeenCalledTimes(1);
+    const reopened = new ProductionSyncPanel(deps);
+    await reopened.attachStore(store, async () => {});
+    await reopened.start({ VITE_FIREBASE_PROJECT_ID: 'demo' });
+    expect((reopened.element as unknown as FakeElement).allText()).toContain('Not connected');
+    expect(await store.journalId()).toBe(journalA);
+    expect(await store.pending(productionProvider(journalA))).toEqual(before);
+    expect(signIn).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+    expect(pull).not.toHaveBeenCalled();
+    reopened.dispose();
+  });
 });

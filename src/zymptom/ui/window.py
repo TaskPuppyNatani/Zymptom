@@ -22,14 +22,22 @@ from .branding import application_icon, brand_mark
 from .export_dialog import ExportDialog
 from .backup_dialog import BackupDialog
 from .recovery_dialog import RecoveryDialog
-from .sync_dialog import SyncDialog
+from .sync_dialog import SyncDialog, restore_production_sync_session
 from .labels import OUTCOMES
 from .time import to_local, to_local_datetime
 from .widgets import comfortable
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, service: EpisodeService, *, zone: QTimeZone | None = None, now=None, backup_session=None):
+    def __init__(
+        self,
+        service: EpisodeService,
+        *,
+        zone: QTimeZone | None = None,
+        now=None,
+        backup_session=None,
+        credential_store=None,
+    ):
         super().__init__()
         self.service = service
         self.zone = zone or QTimeZone.systemTimeZone()
@@ -37,6 +45,7 @@ class MainWindow(QMainWindow):
         self.editor = None
         self.export_dialog = None
         self.backup_session = backup_session
+        self.credential_store = credential_store
         self.backup_dialog = None
         self.recovery_dialog = None
         self.sync_dialog = None
@@ -45,6 +54,7 @@ class MainWindow(QMainWindow):
         self._sync_last_sync = None
         self._sync_successful = False
         self._sync_disconnected = False
+        self._restore_sync_session()
         self.backup_action = self.menuBar().addMenu("Journal").addAction("Backups / Restore…")
         self.backup_action.setEnabled(backup_session is not None)
         self.backup_action.triggered.connect(self.open_backup_dialog)
@@ -245,7 +255,13 @@ class MainWindow(QMainWindow):
         if self._sync_modal_open():
             self.sync_dialog.raise_()
             return
-        dialog = SyncDialog(self.backup_session, zone=self.zone, now=lambda: self.now(), parent=self)
+        dialog = SyncDialog(
+            self.backup_session,
+            zone=self.zone,
+            now=lambda: self.now(),
+            parent=self,
+            credential_store=self.credential_store,
+        )
         self.sync_dialog = dialog
         dialog.finished.connect(lambda: setattr(self, "sync_dialog", None))
         dialog.finished.connect(dialog.deleteLater)
@@ -253,12 +269,20 @@ class MainWindow(QMainWindow):
 
     open_enrollment_dialog = open_sync_dialog
 
+    def _restore_sync_session(self):
+        if self.backup_session is None or self.backup_session.connection is None or self._sync_disconnected:
+            return
+        config, auth, _unavailable = restore_production_sync_session(self.backup_session, store=self.credential_store)
+        if auth is not None:
+            self._sync_config, self._sync_auth = config, auth
+
     def _restored_backup(self):
         self._sync_auth = None
         self._sync_config = None
         self._sync_last_sync = None
         self._sync_successful = False
         self._sync_disconnected = False
+        self._restore_sync_session()
         self.refresh()
         self.history.refresh()
 

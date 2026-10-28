@@ -13,7 +13,23 @@ from zymptom.domain import EpisodeOutcome
 from zymptom.persistence import EpisodeRepository
 from zymptom.persistence.backups import BackupError, content_hash, readonly
 from zymptom.persistence.database import transaction
-from zymptom.sandbox.auth import DesktopConfig, FirebaseSession, HttpError, firebase_exchange, read_config, request_json
+from zymptom.sandbox.auth import (
+    AuthError,
+    CredentialStoreError,
+    DesktopConfig,
+    FirebaseSession,
+    HttpError,
+    MemoryCredentialStore,
+    SecretToolCredentialStore,
+    clear_persisted_session,
+    firebase_exchange,
+    read_config,
+    refresh_firebase_session,
+    request_json,
+    restore_persisted_session,
+    save_persisted_session,
+)
+from zymptom.exports import ExportRange, render_csv, render_json
 from zymptom.sandbox.sync import sync_disposable
 from zymptom.sandbox.transport import FirestoreMailbox, IdentityCollision, TransportError
 from zymptom.services.journal import JournalSession, production_provider, sync_production
@@ -675,3 +691,363 @@ def test_production_mailbox_with_firebase_emulator_and_sandbox_isolation(tmp_pat
         sandbox_session.close()
         prod_session_a.close()
         prod_session_b.close()
+
+
+def test_desktop_signin_persists_only_secure_credential_material_and_never_writes_secrets_to_disk_sqlite_backups_or_exports(
+    tmp_path, full_episode, monkeypatch
+):
+    import subprocess
+
+    config_root = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    cfg_file = config_root / "zymptom" / "sync" / "firebase.json"
+    cfg_file.parent.mkdir(parents=True)
+    cfg_file.write_text(
+        json.dumps({
+            "firebase_api_key": "api-key-1",
+            "firebase_project_id": "demo-project",
+            "google_client_id": "client-id-1",
+        }),
+        encoding="utf-8",
+    )
+    config = read_config(cfg_file)
+
+    session_auth = firebase_exchange(
+        config,
+        "google-oauth-id-token-secret",
+        request=lambda _url, **_kw: {
+            "localId": "prod-uid-1",
+            "idToken": "short-lived-jwt-secret",
+            "refreshToken": "long-lived-refresh-secret",
+            "expiresIn": "3600",
+            "email": "user@example.test",
+            "oauthAccessToken": "google-access-token-secret",
+        },
+    )
+    assert session_auth.refresh_token == "long-lived-refresh-secret"
+    assert "long-lived-refresh-secret" not in repr(session_auth)
+    assert "short-lived-jwt-secret" not in repr(session_auth)
+
+    # Verify SecretToolCredentialStore passes secret strictly via stdin and never on argv
+    recorded_calls = []
+    secret_storage = {}
+
+    def fake_secret_tool_run(cmd, *, input=None, capture_output=True, text=True, timeout=5, check=False):
+        recorded_calls.append((list(cmd), input))
+        key = tuple(cmd[cmd.index("service") :])
+        if cmd[1] == "store":
+            assert input is not None
+            assert all("long-lived-refresh-secret" not in arg for arg in cmd)
+            secret_storage[key] = input
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[1] == "lookup":
+            if key not in secret_storage:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=secret_storage[key], stderr="")
+        if cmd[1] == "clear":
+            secret_storage.pop(key, None)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected command {cmd}")
+
+    os_store = SecretToolCredentialStore(binary="/usr/bin/secret-tool", runner=fake_secret_tool_run)
+    session = JournalSession(tmp_path / "production.sqlite3")
+    try:
+        insert_untracked(session.connection, deepcopy(full_episode))
+        enrollment = session.enroll_sync()
+        save_persisted_session(
+            config,
+            session_auth,
+            scope="production",
+            journal_id=enrollment.journal_id,
+            store=os_store,
+        )
+        assert len(recorded_calls) == 1
+        stored_raw = os_store.load("production", "demo-project", str(enrollment.journal_id))
+        assert stored_raw is not None
+        parsed = json.loads(stored_raw)
+        assert set(parsed.keys()) == {
+            "schema_version",
+            "scope",
+            "firebase_project_id",
+            "journal_id",
+            "uid",
+            "email",
+            "refresh_token",
+        }
+        assert parsed["refresh_token"] == "long-lived-refresh-secret"
+        assert "short-lived-jwt-secret" not in stored_raw
+        assert "google-oauth-id-token-secret" not in stored_raw
+        assert "google-access-token-secret" not in stored_raw
+
+        # Run a production sync and verify no token/refresh secret appears in SQLite, backups, exports, or config
+        fake = FakeProductionFirestore()
+        mailbox = FirestoreMailbox("demo-project", session_auth, request=fake, journal_id=enrollment.journal_id)
+        session.sync_production(mailbox, approve_first_sync=True)
+
+        manual_backup = tmp_path / "manual-backup.sqlite3"
+        session.create_manual_backup(manual_backup)
+        episodes = session.episodes.list()
+        exported_json = render_json(episodes, ExportRange(None, None, "UTC"))
+        exported_csv = render_csv(episodes)
+        sqlite_dump = "\n".join(session.connection.iterdump())
+        backup_bytes = manual_backup.read_bytes().decode("utf-8", errors="ignore")
+        config_text = cfg_file.read_text(encoding="utf-8")
+
+        for forbidden in (
+            "long-lived-refresh-secret",
+            "short-lived-jwt-secret",
+            "google-oauth-id-token-secret",
+            "google-access-token-secret",
+        ):
+            assert forbidden not in sqlite_dump
+            assert forbidden not in backup_bytes
+            assert forbidden not in exported_json
+            assert forbidden not in exported_csv
+            assert forbidden not in config_text
+    finally:
+        session.close()
+
+
+def test_secret_tool_disconnect_checks_that_the_credential_was_removed():
+    import subprocess
+
+    calls = []
+    def locked_item_remains(cmd, **_kwargs):
+        calls.append(cmd[1])
+        return subprocess.CompletedProcess(cmd, 0, stdout="still-present" if cmd[1] == "lookup" else "", stderr="")
+    store = SecretToolCredentialStore(runner=locked_item_remains)
+    with pytest.raises(CredentialStoreError):
+        store.delete("production", "demo-project", str(uuid4()))
+    assert calls == ["lookup", "clear", "lookup"]
+
+
+def test_restored_desktop_session_refreshes_expired_token_and_allows_manual_sync_now(tmp_path, full_episode):
+    store = MemoryCredentialStore()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    fake = FakeProductionFirestore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    try:
+        insert_untracked(session.connection, deepcopy(full_episode))
+        enrollment = session.enroll_sync()
+        initial_auth = FirebaseSession(
+            uid="prod-user-1",
+            id_token="initial-jwt",
+            expires_at=time.monotonic() + 3600,
+            email="user@example.test",
+            refresh_token="refresh-token-v1",
+        )
+        save_persisted_session(
+            config,
+            initial_auth,
+            scope="production",
+            journal_id=enrollment.journal_id,
+            store=store,
+        )
+        first_box = FirestoreMailbox("demo-project", initial_auth, request=fake, journal_id=enrollment.journal_id)
+        session.sync_production(first_box, approve_first_sync=True)
+
+        # Simulate app close & reopen: restore_persisted_session returns a session whose ID token is expired/empty
+        refresh_calls = []
+
+        def fake_refresh_request(url, *, data=None, headers=None):
+            assert url == "https://securetoken.googleapis.com/v1/token?key=api-key-1"
+            from urllib.parse import parse_qs
+            payload = {key: value[0] for key, value in parse_qs(data.decode("utf-8")).items()}
+            refresh_calls.append(payload)
+            assert payload == {"grant_type": "refresh_token", "refresh_token": "refresh-token-v1"}
+            return {
+                "user_id": "prod-user-1",
+                "id_token": "refreshed-jwt-v2",
+                "refresh_token": "refresh-token-v2",
+                "expires_in": "3600",
+            }
+
+        restored = restore_persisted_session(
+            config,
+            scope="production",
+            journal_id=enrollment.journal_id,
+            store=store,
+            request=fake_refresh_request,
+        )
+        assert restored is not None
+        assert restored.uid == "prod-user-1"
+        assert restored.email == "user@example.test"
+        assert restored.id_token == ""
+        assert refresh_calls == []  # Restoring does NOT hit network eagerly on startup
+
+        # Record a new local entry and run manual Sync now -> refreshes token on demand and rotates stored refresh_token
+        created = session.episodes.record(activity="Synced after reopen", outcome=EpisodeOutcome.COMPLETED_NORMALLY)
+        reopened_box = FirestoreMailbox("demo-project", restored, request=fake, journal_id=enrollment.journal_id)
+        result = session.sync_production(reopened_box, has_synced_before=True)
+        assert result.up_to_date is True
+        assert len(result.uploaded) == 1
+        assert len(refresh_calls) == 1
+        assert restored.id_token == "refreshed-jwt-v2"
+        assert restored.refresh_token == "refresh-token-v2"
+        assert session.episodes.get(created.id) is not None
+
+        # Verify rotated refresh token was persisted in credential store
+        saved_payload = json.loads(
+            store.load("production", "demo-project", str(enrollment.journal_id))
+        )
+        assert saved_payload["refresh_token"] == "refresh-token-v2"
+    finally:
+        session.close()
+
+
+def test_revoked_or_invalid_stored_refresh_credential_fails_safely(tmp_path, full_episode):
+    store = MemoryCredentialStore()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    session = JournalSession(tmp_path / "production.sqlite3")
+    try:
+        insert_untracked(session.connection, deepcopy(full_episode))
+        enrollment = session.enroll_sync()
+        before = content_hash(session.connection)
+
+        # Malformed credentials are ignored without deleting them.
+        store.save("production", "demo-project", str(enrollment.journal_id), "{not-valid-json")
+        assert (
+            restore_persisted_session(
+                config,
+                scope="production",
+                journal_id=enrollment.journal_id,
+                store=store,
+            )
+            is None
+        )
+        assert (
+            store.load("production", "demo-project", str(enrollment.journal_id))
+            == "{not-valid-json"
+        )
+
+        # 2. Revoked refresh token (HTTP 400 from securetoken) raises AuthError(kind="auth") without leaking secret
+        save_persisted_session(
+            config,
+            FirebaseSession(
+                uid="prod-user-1",
+                id_token="old-jwt",
+                expires_at=time.monotonic() + 3600,
+                email="user@example.test",
+                refresh_token="revoked-refresh-secret-token",
+            ),
+            scope="production",
+            journal_id=enrollment.journal_id,
+            store=store,
+        )
+        restored = restore_persisted_session(
+            config,
+            scope="production",
+            journal_id=enrollment.journal_id,
+            store=store,
+            request=lambda _url, **_kw: (_ for _ in ()).throw(HttpError(400)),
+        )
+        assert restored is not None
+        mailbox = FirestoreMailbox(
+            "demo-project",
+            restored,
+            request=FakeProductionFirestore(),
+            journal_id=enrollment.journal_id,
+        )
+        with pytest.raises(AuthError) as exc_info:
+            session.sync_production(mailbox, approve_first_sync=True)
+        assert exc_info.value.kind == "auth"
+        assert "revoked-refresh-secret-token" not in str(exc_info.value)
+        assert content_hash(session.connection) == before
+    finally:
+        session.close()
+
+
+def test_production_and_sandbox_credential_states_cannot_cross_contaminate():
+    store = MemoryCredentialStore()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    prod_journal_id = uuid4()
+
+    sandbox_auth = FirebaseSession(
+        uid="user-1",
+        id_token="sandbox-jwt",
+        expires_at=time.monotonic() + 3600,
+        email="user@example.test",
+        refresh_token="sandbox-refresh-token",
+    )
+    prod_auth = FirebaseSession(
+        uid="user-1",
+        id_token="prod-jwt",
+        expires_at=time.monotonic() + 3600,
+        email="user@example.test",
+        refresh_token="prod-refresh-token",
+    )
+
+    # Saving sandbox credential does not satisfy production restore
+    save_persisted_session(config, sandbox_auth, scope="sandbox", journal_id="sandbox", store=store)
+    assert restore_persisted_session(config, scope="production", journal_id=prod_journal_id, store=store) is None
+
+    # Production scope rejects "sandbox" or all-zero UUID journal_id
+    with pytest.raises(ValueError):
+        save_persisted_session(config, prod_auth, scope="production", journal_id="sandbox", store=store)
+    with pytest.raises(ValueError):
+        save_persisted_session(
+            config,
+            prod_auth,
+            scope="production",
+            journal_id=UUID("00000000-0000-0000-0000-000000000000"),
+            store=store,
+        )
+
+    # Saving production credential keeps both isolated; clearing sandbox leaves production intact
+    save_persisted_session(config, prod_auth, scope="production", journal_id=prod_journal_id, store=store)
+    clear_persisted_session(config, scope="sandbox", journal_id="sandbox", store=store)
+    assert restore_persisted_session(config, scope="sandbox", journal_id="sandbox", store=store) is None
+    restored_prod = restore_persisted_session(config, scope="production", journal_id=prod_journal_id, store=store)
+    assert restored_prod is not None
+    assert restored_prod.refresh_token == "prod-refresh-token"
+
+
+def test_wrong_account_or_mismatched_journal_protection_rejects_sync_after_session_restore(tmp_path, full_episode):
+    store = MemoryCredentialStore()
+    config = DesktopConfig("api-key-1", "demo-project", "client-id-1")
+    session_a = JournalSession(tmp_path / "journal_a.sqlite3")
+    session_b = JournalSession(tmp_path / "journal_b.sqlite3")
+    try:
+        insert_untracked(session_a.connection, deepcopy(full_episode))
+        enrollment_a = session_a.enroll_sync()
+        enrollment_b = session_b.enroll_sync()
+
+        save_persisted_session(
+            config,
+            FirebaseSession(
+                uid="prod-user-1",
+                id_token="jwt-a",
+                expires_at=time.monotonic() + 3600,
+                email="user@example.test",
+                refresh_token="refresh-a",
+            ),
+            scope="production",
+            journal_id=enrollment_a.journal_id,
+            store=store,
+        )
+
+        # Journal B cannot restore Journal A's persisted session
+        assert (
+            restore_persisted_session(config, scope="production", journal_id=enrollment_b.journal_id, store=store)
+            is None
+        )
+
+        # If token refresh returns a different Firebase UID than the stored session, refresh rejects with AuthError
+        restored_a = restore_persisted_session(
+            config,
+            scope="production",
+            journal_id=enrollment_a.journal_id,
+            store=store,
+            request=lambda _url, **_kw: {
+                "user_id": "different-uid-2",
+                "id_token": "wrong-user-jwt",
+                "refresh_token": "refresh-wrong",
+                "expires_in": "3600",
+            },
+        )
+        assert restored_a is not None
+        with pytest.raises(AuthError, match="different account"):
+            restored_a.valid_token()
+    finally:
+        session_a.close()
+        session_b.close()

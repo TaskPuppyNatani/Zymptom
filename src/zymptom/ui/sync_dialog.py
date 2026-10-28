@@ -14,7 +14,15 @@ from PySide6.QtWidgets import (
 
 from zymptom.dictation.config import configuration_path
 from zymptom.persistence.backups import BackupError
-from zymptom.sandbox.auth import AuthError, read_config, sign_in
+from zymptom.sandbox.auth import (
+    AuthError,
+    CredentialStoreError,
+    clear_persisted_session,
+    read_config,
+    restore_persisted_session,
+    save_persisted_session,
+    sign_in,
+)
 from zymptom.sandbox.isolation import IsolationError
 from zymptom.sandbox.transport import FirestoreMailbox, TransportError
 from zymptom.sync.contract import SyncError
@@ -57,16 +65,55 @@ class ProductionAuthWorker(QThread):
                 self.failure.emit("signin")
 
 
+def restore_production_sync_session(session, *, store=None):
+    if session is None or getattr(session, "connection", None) is None:
+        return None, None, False
+    try:
+        preview = session.inspect_enrollment()
+    except (BackupError, SyncError, sqlite3.Error, OSError, ValueError, RuntimeError):
+        return None, None, False
+    if not preview.enrolled or preview.bootstrap_required_count > 0 or preview.journal_id is None:
+        return None, None, False
+    try:
+        config = read_config()
+    except AuthError:
+        return None, None, False
+    try:
+        restored = restore_persisted_session(
+            config,
+            scope="production",
+            journal_id=preview.journal_id,
+            store=store,
+        )
+    except CredentialStoreError:
+        return config, None, True
+    return (config if restored is not None else None), restored, False
+
+
 class SyncDialog(QDialog):
     enrolled = Signal()
     synced = Signal()
 
-    def __init__(self, session, *, zone: QTimeZone | None = None, now=None, mailbox_factory=None, parent=None):
+    def __init__(
+        self,
+        session,
+        *,
+        zone: QTimeZone | None = None,
+        now=None,
+        mailbox_factory=None,
+        credential_store=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.session = session
         self.zone = zone or QTimeZone.systemTimeZone()
         self.now = now or (lambda: datetime.now(UTC))
         self.mailbox_factory = mailbox_factory
+        self.credential_store = (
+            credential_store
+            if credential_store is not None
+            else (getattr(parent, "_credential_store", None) if parent is not None else None)
+        )
         self.preview = None
         self.sync_preview = None
         self.confirmation = None
@@ -75,6 +122,20 @@ class SyncDialog(QDialog):
         self.config = getattr(parent, "_sync_config", None) if parent is not None else None
         self.last_sync = getattr(parent, "_sync_last_sync", None) if parent is not None else None
         self.disconnected = getattr(parent, "_sync_disconnected", False) if parent is not None else False
+        self.persistence_unavailable = (
+            getattr(parent, "_sync_persistence_unavailable", False) if parent is not None else False
+        )
+        if self.auth is None and not self.disconnected:
+            config, restored, unavailable = restore_production_sync_session(
+                self.session,
+                store=self.credential_store,
+            )
+            if unavailable:
+                self.persistence_unavailable = True
+            elif restored is not None:
+                self.config = config
+                self.auth = restored
+                self.persistence_unavailable = False
         self.sync_state = SyncState(
             connected=self.auth is not None,
             successful=getattr(parent, "_sync_successful", False) if parent is not None else False,
@@ -194,6 +255,7 @@ class SyncDialog(QDialog):
             parent._sync_last_sync = self.last_sync
             parent._sync_successful = self.sync_state.successful
             parent._sync_disconnected = self.disconnected
+            parent._sync_persistence_unavailable = self.persistence_unavailable
 
     def _settings(self):
         return QSettings(str(configuration_path().parent / "production-sync.ini"), QSettings.Format.IniFormat)
@@ -359,6 +421,10 @@ class SyncDialog(QDialog):
             )
         elif self.sync_state.failure:
             self.status.setText(MESSAGES.get(self.sync_state.failure, MESSAGES["other"]))
+        elif self.persistence_unavailable and not self.status.text():
+            self.status.setText(
+                "Persistent sign-in is unavailable because the system credential store could not be accessed."
+            )
 
     def _error(self, error):
         self.status.setText(enrollment_failure_message(error))
@@ -461,20 +527,75 @@ class SyncDialog(QDialog):
         self.sync_state.failure = None
         self.sync_state.successful = False
         journal_id = self.preview.journal_id if self.preview is not None else self.session.journal_id
+        if self.config is None:
+            try:
+                self.config = read_config()
+            except AuthError:
+                pass
+        persistence_notice = ""
+        if self.config is not None and journal_id is not None and getattr(session, "refresh_token", None):
+            try:
+                save_persisted_session(
+                    self.config,
+                    session,
+                    scope="production",
+                    journal_id=journal_id,
+                    store=self.credential_store,
+                )
+                restored = restore_persisted_session(
+                    self.config, scope="production", journal_id=journal_id, store=self.credential_store,
+                )
+                if restored is not None:
+                    object.__setattr__(session, "_refresher", restored._refresher)
+                self.persistence_unavailable = False
+            except CredentialStoreError:
+                self.persistence_unavailable = True
+                persistence_notice = (
+                    " Persistent sign-in is unavailable because the system credential store could not be accessed."
+                )
+            except ValueError:
+                pass
+        else:
+            self.persistence_unavailable = True
+            persistence_notice = " Persistent sign-in is unavailable for this session."
         self.last_sync = self._load_saved_last_sync(journal_id)
         self.refresh(clear_status=True)
         if self.first_sync_required:
-            self.status.setText("Review the first-sync details above, then select Start sync when ready.")
+            base = "Review the first-sync details above, then select Start sync when ready."
         else:
-            self.status.setText("Connected. Select Sync now to manually synchronize this journal.")
+            base = "Connected. Select Sync now to manually synchronize this journal."
+        self.status.setText(base + persistence_notice)
 
     def cancel_auth(self):
         if isinstance(self.worker, ProductionAuthWorker):
             self.worker.cancel.set()
             self.status.setText("Cancelling sign-in…")
 
+    def _clear_stored_credential(self):
+        journal_id = self.preview.journal_id if self.preview is not None else self.session.journal_id
+        config = self.config
+        if config is None:
+            try:
+                config = read_config()
+            except AuthError:
+                config = None
+        if config is not None and journal_id is not None:
+            try:
+                clear_persisted_session(
+                    config,
+                    scope="production",
+                    journal_id=journal_id,
+                    store=self.credential_store,
+                )
+            except (CredentialStoreError, ValueError):
+                return False
+        return True
+
     def sign_out(self):
         if self.worker is not None or self.sync_state.busy:
+            return
+        if not self._clear_stored_credential():
+            self.status.setText("Could not remove the saved sign-in from the system credential store. Try disconnecting again.")
             return
         self.auth = None
         self.config = None

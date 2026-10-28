@@ -198,6 +198,9 @@ class SandboxWindow(MainWindow):
     def open_enrollment_dialog(self):
         self.statusBar().showMessage("Production sync setup is disabled in the disposable sandbox.")
 
+    def _restore_sync_session(self):
+        pass
+
     def _controls(self):
         busy = self.worker is not None
         signed = self.auth is not None

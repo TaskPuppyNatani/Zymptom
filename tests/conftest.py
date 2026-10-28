@@ -5,12 +5,14 @@ import pytest
 
 from zymptom.domain import EpisodeOutcome, FunctionalEpisode, HelpLevel, ResumeAbility
 from zymptom.persistence import EpisodeRepository, connect_database
+from zymptom.sandbox import auth as auth_module
 
 
 @pytest.fixture(autouse=True)
 def isolated_installation(tmp_path, monkeypatch):
     """No test may create installation identity/config in the real user home."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "installation-config"))
+    monkeypatch.setattr(auth_module, "_DEFAULT_CREDENTIAL_STORE", auth_module.MemoryCredentialStore())
 
 
 @pytest.fixture
