@@ -3,6 +3,7 @@ import { parseCanonicalChange, type Z5Change } from './sandbox/z5-wire';
 import { buildChange, frontier, reconcile, validateLegacyOrigin, type SyncConflict } from './sync';
 
 export const DATABASE_NAME = 'zymptom-pwa-m0-disposable';
+export const PRODUCTION_DATABASE_NAME = 'zymptom-pwa-production';
 export interface LocalRecord {
   record_type: 'functional_episode';
   record_id: string;
@@ -73,6 +74,34 @@ export class EpisodeStore {
     });
   }
 
+  async journalId(): Promise<string | null> {
+    return this.run(['installation'], 'readonly', (transaction, set, guard) => {
+      const request = transaction.objectStore('installation').get('journal_id');
+      request.onsuccess = () => guard(() => {
+        const identity: unknown = request.result;
+        if (identity === undefined || identity === null) { set(null); return; }
+        if (typeof identity !== 'string' || !uuidPattern.test(identity) || identity !== identity.toLowerCase() || identity === '00000000-0000-0000-0000-000000000000') {
+          throw new Error('Invalid local production journal identity.');
+        }
+        set(identity);
+      });
+    });
+  }
+
+  async lastSyncedAt(): Promise<string | null> {
+    return this.run(['installation'], 'readonly', (transaction, set) => {
+      const request = transaction.objectStore('installation').get('last_synced_at');
+      request.onsuccess = () => set(typeof request.result === 'string' ? request.result : null);
+    });
+  }
+
+  async setLastSyncedAt(isoTimestamp: string): Promise<void> {
+    await this.run<void>(['installation'], 'readwrite', (transaction, set) => {
+      transaction.objectStore('installation').put(isoTimestamp, 'last_synced_at');
+      set(undefined);
+    });
+  }
+
   private async snapshot(): Promise<Snapshot> {
     return this.run(['episodes', 'changes', 'conflicts', 'installation'], 'readonly', (tx, set, guard) => {
       const records = tx.objectStore('episodes').getAll();
@@ -84,7 +113,7 @@ export class EpisodeStore {
     });
   }
 
-  private async commit(snapshot: Snapshot, changes: Z5Change[], records: LocalRecord[], conflicts: SyncConflict[], provider?: string, acknowledged: string[] = []): Promise<void> {
+  private async commit(snapshot: Snapshot, changes: Z5Change[], records: LocalRecord[], conflicts: SyncConflict[], provider?: string, acknowledged: string[] = [], journalId?: string): Promise<void> {
     await this.run<void>(['episodes', 'changes', 'conflicts', 'installation', 'acknowledgements'], 'readwrite', (tx, set, guard) => {
       const installation = tx.objectStore('installation');
       const version = installation.get('sync_version');
@@ -94,6 +123,7 @@ export class EpisodeStore {
         for (const record of records) tx.objectStore('episodes').put(record);
         for (const conflict of conflicts) tx.objectStore('conflicts').put(conflict);
         if (provider) for (const id of acknowledged) tx.objectStore('acknowledgements').put(true, `${provider}:${id}`);
+        if (journalId) installation.put(journalId, 'journal_id');
         installation.put(snapshot.version + 1, 'sync_version');
         set(undefined);
       });
@@ -174,6 +204,34 @@ export class EpisodeStore {
     const records = [...heads.values()].map((id) => this.head(changes.get(id)!));
     await this.commit(snapshot, [...changes.values()].filter((change) => !original.has(change.change_id)), records, conflicts,
       provider, incoming.map((change) => change.change_id));
+  }
+
+  async joinProductionJournal(journalId: string, payloads: string[], provider: string): Promise<void> {
+    if (typeof journalId !== 'string' || !uuidPattern.test(journalId) || journalId !== journalId.toLowerCase() || journalId === '00000000-0000-0000-0000-000000000000') {
+      throw new Error('Invalid production journal identity.');
+    }
+    if (provider !== `firebase-production:${journalId}`) {
+      throw new Error('Invalid production sync provider.');
+    }
+    const incoming = await Promise.all(payloads.map(parseCanonicalChange));
+    await Promise.all(incoming.map(validateLegacyOrigin));
+    if (new Set(incoming.map((change) => change.change_id)).size !== incoming.length) throw new Error('Duplicate incoming change identity.');
+    const existingJournal = await this.journalId();
+    const snapshot = await this.snapshot();
+    if (existingJournal !== null && existingJournal !== journalId) {
+      throw new Error('This browser is already linked to a different production journal. Local production data was not changed.');
+    }
+    if (existingJournal === null && (snapshot.records.length > 0 || snapshot.changes.length > 0 || snapshot.conflicts.length > 0)) {
+      throw new Error('Local production storage already contains unlinked journal data. Refusing to merge automatically.');
+    }
+    const changes = new Map(snapshot.changes.map((change) => [change.change_id, change]));
+    const heads = new Map(snapshot.records.filter((record) => changes.has(record.local_change_id)).map((record) => [record.record_id, record.local_change_id]));
+    const original = new Set(changes.keys());
+    const conflicts = structuredClone(snapshot.conflicts);
+    await reconcile(changes, heads, conflicts, incoming);
+    const records = [...heads.values()].map((id) => this.head(changes.get(id)!));
+    await this.commit(snapshot, [...changes.values()].filter((change) => !original.has(change.change_id)), records, conflicts,
+      provider, incoming.map((change) => change.change_id), journalId);
   }
 
   async resolve(recordId: string, selectedId: string): Promise<void> {

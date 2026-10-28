@@ -20,7 +20,7 @@ input, select, textarea { width: 100%; min-width: 0; min-height: 48px; border: 1
 textarea { resize: vertical; line-height: 1.5; }
 input::placeholder, textarea::placeholder { color: var(--text-muted); }
 input[type="datetime-local"] { appearance: none; }
-input[type="checkbox"] { width: 22px; height: 22px; min-height: 22px; accent-color: var(--accent); flex: 0 0 22px; }
+input[type="checkbox"], input[type="radio"] { width: 22px; height: 22px; min-height: 22px; accent-color: var(--accent); flex: 0 0 22px; }
 #app { max-width: 680px; margin: 0 auto; padding: max(24px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
 .app-header { padding: 0 0 24px; border-bottom: 1px solid var(--border); }
 .wordmark { color: var(--accent-hover); font-weight: 750; font-size: 24px; letter-spacing: -.8px; margin: 0 0 5px; }
@@ -74,8 +74,8 @@ p { line-height: 1.55; }
 .dialog-actions { margin-top: 24px; }
 .proof-info { color: var(--text-muted); margin-top: 36px; border-top: 1px solid var(--border); padding-top: 18px; font-size: 13px; }
 .proof-info summary { padding: 12px 0; min-height: 44px; }
-.sandbox-panel { margin-top: 22px; border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: var(--surface); }
-.sandbox-panel > summary { min-height: 44px; padding: 12px 0; color: var(--accent-hover); font-weight: 650; }
+.sandbox-panel, .production-panel { margin-top: 22px; border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: var(--surface); }
+.sandbox-panel > summary, .production-panel > summary { min-height: 44px; padding: 12px 0; color: var(--accent-hover); font-weight: 650; }
 .sandbox-copy, .sandbox-state { color: var(--text-secondary); font-size: 13px; }
 .sandbox-actions { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
 .sandbox-wide { width: 100%; }

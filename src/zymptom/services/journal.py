@@ -334,6 +334,8 @@ class JournalSession:
         else:
             merge = MergeResult()
             safety_backup = None
+        if hasattr(mailbox, "ensure_descriptor"):
+            mailbox.ensure_descriptor()
         pending = service.pending(provider)
         uploaded = []
         for change in pending.changes:

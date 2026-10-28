@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FirebaseError } from 'firebase/app';
-import { firebaseConfigFromEnv, firebaseErrorMessage, safeFirebaseAuthErrorShape,
+import type { Auth, User } from 'firebase/auth';
+import { completeGoogleRedirect, firebaseConfigFromEnv, firebaseErrorMessage, safeFirebaseAuthErrorShape,
   formatSafeFirebaseAuthErrorShape, useRedirectForGoogleSignIn } from '../../src/sandbox/firebase';
 import { sandboxJournalPath } from '../../src/sandbox/transport';
 
@@ -23,9 +24,20 @@ describe('Firebase sandbox configuration and UI state helpers', () => {
     expect(() => firebaseConfigFromEnv({ VITE_FIREBASE_PROJECT_ID: 'half-configured' })).toThrow('configuration is incomplete');
   });
 
-  it('chooses redirect auth for installed standalone mode and popups otherwise', () => {
+  it('uses popup auth in both browser and standalone PWA modes and deduplicates redirect completion per Auth instance', async () => {
     expect(useRedirectForGoogleSignIn(false)).toBe(false);
-    expect(useRedirectForGoogleSignIn(true)).toBe(true);
+    expect(useRedirectForGoogleSignIn(true)).toBe(false);
+
+    const fakeUser = { uid: 'redirect-user-1', email: 'user@example.test' } as User;
+    const fakeAuth = { currentUser: null } as unknown as Auth;
+    const getResult = vi.fn(async () => ({ user: fakeUser }));
+    const [first, second] = await Promise.all([
+      completeGoogleRedirect(fakeAuth, getResult),
+      completeGoogleRedirect(fakeAuth, getResult),
+    ]);
+    expect(getResult).toHaveBeenCalledTimes(1);
+    expect(first).toBe(fakeUser);
+    expect(second).toBe(fakeUser);
   });
 
   it('constructs user-owned sandbox paths from Firebase UID and opaque journal ID', () => {

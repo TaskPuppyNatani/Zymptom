@@ -1,9 +1,9 @@
 import './style.css';
 import { blankEpisode, contract, localDate, localInput, occurredFromInput, tagFields,
   type Episode, type EpisodeInput, type HelpLevel, type Outcome, type ResumeAbility } from './model';
-import { EpisodeStore, type LocalRecord } from './storage';
+import { EpisodeStore, PRODUCTION_DATABASE_NAME, type LocalRecord } from './storage';
 import { TagPicker } from './tags';
-import { SandboxSyncPanel } from './sandbox/panel';
+import { ProductionSyncPanel, SandboxSyncPanel } from './sandbox/panel';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 for (const [name, value] of Object.entries(contract.palette)) {
@@ -64,7 +64,8 @@ function optionalText(control: HTMLTextAreaElement, original: string | null): st
 
 const header = el('header', undefined, 'app-header');
 const wordmark = el('div');
-wordmark.append(el('p', 'Zymptom', 'wordmark'), el('p', 'DISPOSABLE SANDBOX', 'eyebrow'));
+const eyebrow = el('p', 'DISPOSABLE SANDBOX', 'eyebrow');
+wordmark.append(el('p', 'Zymptom', 'wordmark'), eyebrow);
 header.append(wordmark);
 const main = el('main');
 const notice = el('p', '', 'notice');
@@ -77,21 +78,40 @@ logo.width = 48;
 logo.height = 48;
 footer.append(logo, el('span', 'TaskPuppy Kreations'));
 const about = el('details', undefined, 'proof-info');
+const aboutCopy = el('p', 'Use disposable test entries only. Sandbox Sync can manually share these entries between PWA installations. The desktop journal is not connected.');
 const shellStatus = el('p', 'Offline use is available after the production shell is ready.');
 shellStatus.id = 'shell-status';
 shellStatus.setAttribute('role', 'status');
 about.append(el('summary', 'About this mobile proof'),
-  el('p', 'Use disposable test entries only. Sandbox Sync can manually share these entries between PWA installations. The desktop journal is not connected.'),
+  aboutCopy,
   shellStatus,
   el('p', 'To install: Android browser menu → Install app. On iPhone: Share → Add to Home Screen. Installation needs HTTPS (or localhost on this computer).'));
+const productionPanel = new ProductionSyncPanel();
 const sandboxPanel = new SandboxSyncPanel();
-app.replaceChildren(header, notice, main, about, sandboxPanel.element, footer);
+app.replaceChildren(header, notice, main, about, productionPanel.element, sandboxPanel.element, footer);
 
+let disposableStore: EpisodeStore;
+let productionStore: EpisodeStore;
 let store: EpisodeStore;
 let mode: 'today' | 'editor' = 'today';
 let todayDate = '';
 let renderRequest = 0;
 let busy = false;
+
+function renderEpisodeCard(record: LocalRecord, showDate: boolean): HTMLButtonElement {
+  const episode = record.episode!;
+  const card = button('', () => editor(record), 'episode-card');
+  card.setAttribute('aria-label', `Edit ${episode.activity}`);
+  const meta = el('div', undefined, 'card-meta');
+  const format: Intl.DateTimeFormatOptions = showDate
+    ? { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }
+    : { hour: 'numeric', minute: '2-digit' };
+  const time = el('time', new Intl.DateTimeFormat(undefined, format).format(new Date(episode.occurred_at)));
+  time.dateTime = episode.occurred_at;
+  meta.append(time, el('span', episode.duration_minutes === null ? 'Edit entry ↗' : `${episode.duration_minutes} min`));
+  card.append(meta, el('h2', episode.activity), el('p', contract.outcomes[episode.outcome], 'outcome'));
+  return card;
+}
 
 async function today(message = ''): Promise<void> {
   mode = 'today';
@@ -102,6 +122,7 @@ async function today(message = ''): Promise<void> {
     if (mode !== 'today' || request !== renderRequest) return;
     todayDate = localDate(new Date());
     const entries = records.filter((record) => localDate(record.episode!.occurred_at) === todayDate);
+    const earlier = records.filter((record) => localDate(record.episode!.occurred_at) !== todayDate).reverse();
     const heading = el('div', undefined, 'today-heading');
     const title = el('div');
     title.append(el('h1', 'Today'), el('p', new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()), 'date-header'));
@@ -116,17 +137,19 @@ async function today(message = ''): Promise<void> {
       list.append(empty);
     }
     for (const record of entries) {
-      const episode = record.episode!;
-      const card = button('', () => editor(record), 'episode-card');
-      card.setAttribute('aria-label', `Edit ${episode.activity}`);
-      const meta = el('div', undefined, 'card-meta');
-      const time = el('time', new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(episode.occurred_at)));
-      time.dateTime = episode.occurred_at;
-      meta.append(time, el('span', episode.duration_minutes === null ? 'Edit entry ↗' : `${episode.duration_minutes} min`));
-      card.append(meta, el('h2', episode.activity), el('p', contract.outcomes[episode.outcome], 'outcome'));
-      list.append(card);
+      list.append(renderEpisodeCard(record, false));
     }
-    main.replaceChildren(heading, log, count, list);
+    const children: HTMLElement[] = [heading, log, count, list];
+    if (earlier.length) {
+      const earlierLabel = el('p', `${earlier.length} earlier ${earlier.length === 1 ? 'entry' : 'entries'}`, 'section-label');
+      earlierLabel.style.marginTop = '24px';
+      const earlierList = el('div', undefined, 'episode-list');
+      for (const record of earlier) {
+        earlierList.append(renderEpisodeCard(record, true));
+      }
+      children.push(earlierLabel, earlierList);
+    }
+    main.replaceChildren(...children);
     if (message) main.querySelector('h1')?.setAttribute('tabindex', '-1');
     if (message) main.querySelector<HTMLElement>('h1')?.focus();
   } catch (error) {
@@ -216,7 +239,8 @@ function editor(original?: LocalRecord): void {
         for (const field of tagFields) draft[field] = [...pickers.get(field)!.values];
         if (original) await store.update(draft as Episode, original.local_revision, original.local_change_id);
         else await store.create(draft as EpisodeInput);
-        sandboxPanel.localChanged();
+        if (store === productionStore) productionPanel.localChanged();
+        else sandboxPanel.localChanged();
         await today('Entry saved on this browser.');
       } catch (failure) {
         error.textContent = failure instanceof Error ? failure.message : 'The entry could not be saved. Please retry.';
@@ -248,7 +272,8 @@ function confirmDelete(original: LocalRecord, error: HTMLElement): void {
     remove.disabled = true;
     cancel.disabled = true;
     void store.delete(original.record_id, original.local_revision, original.local_change_id).then(async () => {
-      sandboxPanel.localChanged();
+      if (store === productionStore) productionPanel.localChanged();
+      else sandboxPanel.localChanged();
       dialog.close();
       await today('Entry deleted from this browser.');
     }).catch((failure: unknown) => {
@@ -286,14 +311,27 @@ async function offlineShell(): Promise<void> {
   }
 }
 
+async function activateProductionMode(): Promise<void> {
+  store = productionStore;
+  eyebrow.textContent = 'PRODUCTION JOURNAL';
+  aboutCopy.textContent = 'Connected to your production journal. Entries are stored in isolated production storage on this device and synchronize manually with your desktop journal.';
+  sandboxPanel.element.hidden = true;
+  if (mode === 'today') await today();
+}
+
 try {
   if (!window.isSecureContext || !crypto.randomUUID) throw new Error('Open this proof over HTTPS (or localhost). Plain HTTP on a LAN address cannot provide the installable offline proof.');
-  store = await EpisodeStore.open();
-  await store.deviceId();
-  sandboxPanel.attachStore(store, async () => { if (mode === 'today') await today(); });
+  disposableStore = await EpisodeStore.open();
+  productionStore = await EpisodeStore.open(PRODUCTION_DATABASE_NAME);
+  await disposableStore.deviceId();
+  await productionStore.deviceId();
+  store = (await productionStore.journalId()) ? productionStore : disposableStore;
+  sandboxPanel.attachStore(disposableStore, async () => { if (store === disposableStore && mode === 'today') await today(); });
+  await productionPanel.attachStore(productionStore, activateProductionMode);
   await today();
   void offlineShell();
   void sandboxPanel.start(import.meta.env);
+  void productionPanel.start(import.meta.env);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && mode === 'today') void today();
   });
@@ -304,8 +342,8 @@ try {
     // Explicit console-only developer reset; preserve the installation identity.
     Object.assign(window, { resetZymptomProof: async () => {
       if (confirm('Delete all disposable Zymptom PWA M0 entries in this browser?')) {
-        await store.resetDisposableData();
-        await today('Disposable entries cleared.');
+        await disposableStore.resetDisposableData();
+        if (store === disposableStore) await today('Disposable entries cleared.');
       }
     } });
   }

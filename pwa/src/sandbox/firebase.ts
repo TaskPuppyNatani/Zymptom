@@ -48,7 +48,7 @@ export function firebaseConfigFromEnv(env: FirebaseEnvironment): FirebaseWebConf
   };
 }
 
-export function useRedirectForGoogleSignIn(standalone: boolean): boolean { return standalone; }
+export function useRedirectForGoogleSignIn(_standalone = false): boolean { return false; }
 
 // Firebase's backend-error fallback preserves punctuation when it derives this
 // fixed identifier. Allowlist the exact code, never arbitrary dotted text/URLs.
@@ -189,38 +189,65 @@ export function firebaseErrorMessage(error: unknown): string {
   return 'Sandbox Sync could not complete. Local entries remain available; check the Firebase setup and retry.';
 }
 
+const runtimePromises = new Map<string, Promise<FirebaseRuntime>>();
+const redirectCompletions = new WeakMap<Auth, Promise<User | null>>();
+
 export async function initializeFirebaseRuntime(env: FirebaseEnvironment): Promise<FirebaseRuntime | undefined> {
   const config = firebaseConfigFromEnv(env);
   if (!config) return undefined;
   const emulatorMode = env.VITE_FIREBASE_USE_EMULATORS === 'true';
-  const app = getApps().find((candidate) => candidate.name === APP_NAME)
-    ?? initializeApp(config, APP_NAME);
-  if (app.options.projectId !== config.projectId || app.options.appId !== config.appId) {
+  const existingApp = getApps().find((candidate) => candidate.name === APP_NAME);
+  if (existingApp && (existingApp.options.projectId !== config.projectId || existingApp.options.appId !== config.appId)) {
     throw new Error('Firebase Sandbox Sync was already initialized with a different project configuration.');
   }
-  const auth = getAuth(app);
-  const firestore = getFirestore(app);
-  if (emulatorMode) {
-    connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
-    connectFirestoreEmulator(firestore, '127.0.0.1', 8081);
+  const key = `${config.projectId}:${config.appId}:${emulatorMode}`;
+  let pending = runtimePromises.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const app = existingApp ?? initializeApp(config, APP_NAME);
+      if (app.options.projectId !== config.projectId || app.options.appId !== config.appId) {
+        throw new Error('Firebase Sandbox Sync was already initialized with a different project configuration.');
+      }
+      const auth = getAuth(app);
+      const firestore = getFirestore(app);
+      if (emulatorMode) {
+        connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+        connectFirestoreEmulator(firestore, '127.0.0.1', 8081);
+      }
+      await setPersistence(auth, browserLocalPersistence);
+      return { auth, firestore, emulatorMode };
+    })();
+    pending.catch(() => runtimePromises.delete(key));
+    runtimePromises.set(key, pending);
   }
-  await setPersistence(auth, browserLocalPersistence);
-  return { auth, firestore, emulatorMode };
+  return pending;
 }
 
 export function observeSandboxUser(auth: Auth, next: (user: User | null) => void, failure: (error: Error) => void): () => void {
   return onAuthStateChanged(auth, next, failure);
 }
 
-export async function completeGoogleRedirect(auth: Auth): Promise<void> {
-  await getRedirectResult(auth);
+export function completeGoogleRedirect(
+  auth: Auth,
+  getResult: (instance: Auth) => Promise<{ user: User | null } | null> = getRedirectResult,
+): Promise<User | null> {
+  let pending = redirectCompletions.get(auth);
+  if (!pending) {
+    pending = getResult(auth).then((credential) => credential?.user ?? auth.currentUser ?? null);
+    redirectCompletions.set(auth, pending);
+  }
+  return pending;
 }
 
-export async function signInWithGoogle(auth: Auth, standalone = false): Promise<void> {
+export async function signInWithGoogle(auth: Auth, standalone = false): Promise<User | null> {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
-  if (useRedirectForGoogleSignIn(standalone)) await signInWithRedirect(auth, provider);
-  else await signInWithPopup(auth, provider);
+  if (useRedirectForGoogleSignIn(standalone)) {
+    await signInWithRedirect(auth, provider);
+    return null;
+  }
+  const credential = await signInWithPopup(auth, provider);
+  return credential?.user ?? auth.currentUser ?? null;
 }
 
 export async function signOutSandbox(auth: Auth): Promise<void> { await signOut(auth); }

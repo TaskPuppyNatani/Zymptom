@@ -84,11 +84,65 @@ class FirestoreMailbox:
                 return None
             raise
 
-    def _create(self, path, fields, *, timestamp=False):
+    def _create(self, path, fields, *, timestamp=False, timestamp_field="uploaded_at"):
         write = {"update": {"name": f"{self.root}/{path}", "fields": _fields(fields)}, "currentDocument": {"exists": False}}
         if timestamp:
-            write["updateTransforms"] = [{"fieldPath": "uploaded_at", "setToServerValue": "REQUEST_TIME"}]
+            write["updateTransforms"] = [{"fieldPath": timestamp_field, "setToServerValue": "REQUEST_TIME"}]
         self._request(f"https://firestore.googleapis.com/v1/{self.database}/documents:commit", body={"writes": [write]})
+
+    def _descriptor(self, document):
+        data = _decode(document)
+        required = {
+            "owner_uid",
+            "journal_id",
+            "journal_kind",
+            "contract_version",
+            "record_schema_version",
+            "published_at",
+        }
+        if (
+            set(data) != required
+            or set(document.get("fields", {}).get("published_at", {})) != {"timestampValue"}
+            or data["owner_uid"] != self.session.uid
+            or data["journal_id"] != self.journal_id
+            or data["journal_kind"] != "production"
+            or data["contract_version"] != 1
+            or data["record_schema_version"] != 1
+        ):
+            raise TransportError("The production journal descriptor is malformed.")
+        try:
+            timestamp = datetime.fromisoformat(data["published_at"].replace("Z", "+00:00"))
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError()
+            return _uuid(data["journal_id"])
+        except (ValueError, TypeError, AttributeError):
+            raise TransportError("The production journal descriptor is malformed.") from None
+
+    def ensure_descriptor(self):
+        if self.identity_path is not None or self.journal_id is None:
+            raise TransportError("Production journal descriptors cannot be published for the sandbox mailbox.")
+        path = f"users/{self.session.uid}/journals/{self.journal_id}"
+        fields = {
+            "owner_uid": self.session.uid,
+            "journal_id": self.journal_id,
+            "journal_kind": "production",
+            "contract_version": 1,
+            "record_schema_version": 1,
+        }
+        try:
+            document = self._get(path)
+            if document is None:
+                try:
+                    self._create(path, fields, timestamp=True, timestamp_field="published_at")
+                    return "published"
+                except HttpError as failure:
+                    document = self._get(path)
+                    if document is None:
+                        raise failure
+            self._descriptor(document)
+            return "already-published"
+        except HttpError as exc:
+            raise _network_error(exc) from None
 
     def _journal(self, document):
         data = _decode(document)

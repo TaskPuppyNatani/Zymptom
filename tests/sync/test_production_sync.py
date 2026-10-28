@@ -31,6 +31,7 @@ def insert_untracked(connection, episode):
 class FakeProductionFirestore:
     def __init__(self):
         self.documents = {}
+        self.descriptors = {}
         self.requests = []
         self.fail_status = None
         self.fail_on_upload_index = None
@@ -42,19 +43,27 @@ class FakeProductionFirestore:
         if self.fail_status is not None:
             raise HttpError(self.fail_status)
         if data:
-            self.uploads_attempted += 1
-            if self.fail_on_upload_index is not None and self.uploads_attempted == self.fail_on_upload_index:
-                raise HttpError(503)
             write = json.loads(data)["writes"][0]
             assert write["currentDocument"] == {"exists": False}
             document = write["update"]
             key = document["name"]
-            if key in self.documents:
-                raise HttpError(409)
-            if "updateTransforms" in write:
-                assert write["updateTransforms"] == [{"fieldPath": "uploaded_at", "setToServerValue": "REQUEST_TIME"}]
-                document["fields"]["uploaded_at"] = {"timestampValue": "2026-10-27T18:00:00Z"}
-            self.documents[key] = document
+            if "/changes/" in key:
+                self.uploads_attempted += 1
+                if self.fail_on_upload_index is not None and self.uploads_attempted == self.fail_on_upload_index:
+                    raise HttpError(503)
+                if key in self.documents:
+                    raise HttpError(409)
+                if "updateTransforms" in write:
+                    assert write["updateTransforms"] == [{"fieldPath": "uploaded_at", "setToServerValue": "REQUEST_TIME"}]
+                    document["fields"]["uploaded_at"] = {"timestampValue": "2026-10-27T18:00:00Z"}
+                self.documents[key] = document
+            else:
+                if key in self.descriptors:
+                    raise HttpError(409)
+                if "updateTransforms" in write:
+                    assert write["updateTransforms"] == [{"fieldPath": "published_at", "setToServerValue": "REQUEST_TIME"}]
+                    document["fields"]["published_at"] = {"timestampValue": "2026-10-27T18:00:00Z"}
+                self.descriptors[key] = document
             return {}
         path = url.split("/v1/", 1)[1].split("?", 1)[0]
         if "?" in url:
@@ -73,6 +82,8 @@ class FakeProductionFirestore:
                     res["nextPageToken"] = next_token
                 return res
             return {"documents": items}
+        if path in self.descriptors:
+            return self.descriptors[path]
         if path not in self.documents:
             raise HttpError(404)
         return self.documents[path]
@@ -497,6 +508,59 @@ def test_read_config_reuses_existing_sandbox_or_production_config(tmp_path, monk
     assert loaded.firebase_api_key == "sandbox-key"
 
 
+def test_desktop_descriptor_publication_is_explicit_idempotent_and_rejects_malformed(tmp_path, full_episode):
+    fake = FakeProductionFirestore()
+    session = JournalSession(tmp_path / "production.sqlite3")
+    try:
+        insert_untracked(session.connection, deepcopy(full_episode))
+        # App launch / session open / enrollment / auth / mailbox creation never write a descriptor
+        enrollment = session.enroll_sync()
+        session.inspect_production_sync()
+        mailbox = FirestoreMailbox("demo-project", make_auth(), request=fake, journal_id=enrollment.journal_id)
+        mailbox.connect()
+        assert fake.descriptors == {}
+
+        # Sandbox mailbox cannot publish a production descriptor
+        sandbox_mailbox = FirestoreMailbox("demo-project", make_auth(), request=fake)
+        with pytest.raises(TransportError, match="cannot be published for the sandbox"):
+            sandbox_mailbox.ensure_descriptor()
+        assert fake.descriptors == {}
+
+        # First sync publishes the descriptor and uploads changes
+        result = session.sync_production(mailbox, approve_first_sync=True)
+        assert result.up_to_date is True
+        descriptor_key = f"{mailbox.root}/users/prod-user-1/journals/{enrollment.journal_id}"
+        assert descriptor_key in fake.descriptors
+        fields = fake.descriptors[descriptor_key]["fields"]
+        assert fields["owner_uid"] == {"stringValue": "prod-user-1"}
+        assert fields["journal_id"] == {"stringValue": str(enrollment.journal_id)}
+        assert fields["journal_kind"] == {"stringValue": "production"}
+        assert fields["contract_version"] == {"integerValue": "1"}
+        assert fields["record_schema_version"] == {"integerValue": "1"}
+        assert "timestampValue" in fields["published_at"]
+
+        # Repeated sync / ensure_descriptor is idempotent
+        assert mailbox.ensure_descriptor() == "already-published"
+        second = session.sync_production(mailbox)
+        assert second.uploaded == ()
+        assert second.up_to_date is True
+
+        # An already-synced desktop journal with 0 pending changes still ensures its descriptor on explicit Sync now
+        fake.descriptors.clear()
+        assert session.inspect_production_sync().pending_change_count == 0
+        third = session.sync_production(mailbox)
+        assert third.uploaded == ()
+        assert descriptor_key in fake.descriptors
+
+        # Incompatible existing descriptor metadata is rejected without overwriting
+        fake.descriptors[descriptor_key]["fields"]["journal_kind"] = {"stringValue": "sandbox"}
+        with pytest.raises(TransportError, match="descriptor is malformed"):
+            session.sync_production(mailbox)
+        assert fake.descriptors[descriptor_key]["fields"]["journal_kind"] == {"stringValue": "sandbox"}
+    finally:
+        session.close()
+
+
 @pytest.mark.skipif(os.getenv("ZYMPTOM_RUN_EMULATOR_TESTS") != "1", reason="requires local Firebase emulators")
 def test_production_mailbox_with_firebase_emulator_and_sandbox_isolation(tmp_path, full_episode):
     auth_host = os.environ["FIREBASE_AUTH_EMULATOR_HOST"]
@@ -539,6 +603,14 @@ def test_production_mailbox_with_firebase_emulator_and_sandbox_isolation(tmp_pat
         assert res_a.mailbox_state == "empty"
         assert len(res_a.uploaded) == 2
         assert res_a.up_to_date is True
+        assert prod_box_a.ensure_descriptor() == "already-published"
+
+        listed_journals = request_json(
+            f"http://{firestore_host}/v1/{prod_box_a.root}/users/{auth.uid}/journals",
+            headers={"Authorization": "Bearer " + auth.id_token},
+        )
+        doc_names = [doc["name"].rsplit("/", 1)[-1] for doc in listed_journals.get("documents", [])]
+        assert doc_names == [str(enrollment.journal_id)]
 
         # Confirm DEMO sandbox entry never entered production, and production entries never entered sandbox
         assert prod_session_a.episodes.get(sandbox_ep.id) is None
@@ -587,6 +659,18 @@ def test_production_mailbox_with_firebase_emulator_and_sandbox_isolation(tmp_pat
                 headers={"Authorization": "Bearer " + outsider["idToken"]},
             )
         assert denied.value.status == 403
+        with pytest.raises(HttpError) as denied_desc:
+            request_json(
+                f"http://{firestore_host}/v1/{prod_box_a.root}/users/{auth.uid}/journals/{enrollment.journal_id}",
+                headers={"Authorization": "Bearer " + outsider["idToken"]},
+            )
+        assert denied_desc.value.status == 403
+        with pytest.raises(HttpError) as denied_list:
+            request_json(
+                f"http://{firestore_host}/v1/{prod_box_a.root}/users/{auth.uid}/journals",
+                headers={"Authorization": "Bearer " + outsider["idToken"]},
+            )
+        assert denied_list.value.status == 403
     finally:
         sandbox_session.close()
         prod_session_a.close()

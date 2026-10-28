@@ -17,11 +17,22 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { canonicalJson, makeSyntheticCollisionPayload, parseCanonicalBatch, type Z5Change } from '../../src/sandbox/z5-wire';
-import { getOrCreateSandboxJournalId, FirestoreSandboxTransport } from '../../src/sandbox/transport';
+import {
+  discoverProductionJournals,
+  ensureProductionJournalDescriptor,
+  FirestoreSandboxTransport,
+  getOrCreateSandboxJournalId,
+  verifyProductionJournalDescriptor,
+} from '../../src/sandbox/transport';
 import 'fake-indexeddb/auto';
 import { EpisodeStore } from '../../src/storage';
 import { blankEpisode } from '../../src/model';
-import { syncDisposableEntries } from '../../src/sandbox/disposable-sync';
+import {
+  ProductionSyncController,
+  productionProvider,
+  syncDisposableEntries,
+  syncProductionEntries,
+} from '../../src/sandbox/disposable-sync';
 
 const projectId = 'demo-zymptom-z51';
 const rules = await readFile(new URL('../../firestore.rules', import.meta.url), 'utf8');
@@ -204,5 +215,157 @@ describe('Firestore immutable transport adapter', () => {
     });
     await expect(new FirestoreSandboxTransport(db, owner, journal).pullChanges()).rejects.toThrow('Malformed canonical Z5 JSON');
     expect((await getDoc(reference)).exists()).toBe(true);
+  });
+});
+
+describe('Firestore production journal descriptor rules and PWA join', () => {
+  const prodJournal = '11111111-2222-4333-8444-555555555555';
+
+  function descriptorDoc(owner: string, journal = prodJournal) {
+    return {
+      owner_uid: owner,
+      journal_id: journal,
+      journal_kind: 'production',
+      contract_version: 1,
+      record_schema_version: 1,
+      published_at: serverTimestamp(),
+    };
+  }
+
+  it('enforces UID isolation, immutable schema, and sandbox non-reuse on production journal descriptors', async () => {
+    const unauth = environment.unauthenticatedContext().firestore();
+    const owner = environment.authenticatedContext('prod-owner').firestore();
+    const outsider = environment.authenticatedContext('prod-outsider').firestore();
+
+    await assertFails(getDoc(doc(unauth, 'users', 'prod-owner', 'journals', prodJournal)));
+    await assertFails(getDocs(collection(unauth, 'users', 'prod-owner', 'journals')));
+    await assertFails(setDoc(doc(unauth, 'users', 'prod-owner', 'journals', prodJournal), descriptorDoc('prod-owner')));
+
+    // Allocate a sandbox journal first; rules must forbid publishing the sandbox journal ID as production
+    const sandboxJournal = await getOrCreateSandboxJournalId(owner, 'prod-owner');
+    await assertFails(
+      setDoc(doc(owner, 'users', 'prod-owner', 'journals', sandboxJournal), descriptorDoc('prod-owner', sandboxJournal)),
+    );
+
+    // Reject zero UUID, wrong kind, wrong owner, or extra fields (medical content)
+    await assertFails(
+      setDoc(
+        doc(owner, 'users', 'prod-owner', 'journals', '00000000-0000-0000-0000-000000000000'),
+        descriptorDoc('prod-owner', '00000000-0000-0000-0000-000000000000'),
+      ),
+    );
+    await assertFails(
+      setDoc(doc(owner, 'users', 'prod-owner', 'journals', prodJournal), {
+        ...descriptorDoc('prod-owner'),
+        journal_kind: 'sandbox',
+      }),
+    );
+    await assertFails(
+      setDoc(doc(owner, 'users', 'prod-owner', 'journals', prodJournal), {
+        ...descriptorDoc('prod-owner'),
+        activity: 'forbidden medical field',
+      }),
+    );
+
+    // Publish valid production descriptor idempotently
+    expect(await ensureProductionJournalDescriptor(owner, 'prod-owner', prodJournal)).toBe('published');
+    expect(await ensureProductionJournalDescriptor(owner, 'prod-owner', prodJournal)).toBe('already-published');
+
+    const discovered = await discoverProductionJournals(owner, 'prod-owner');
+    expect(discovered.map((d) => d.journalId)).toEqual([prodJournal]);
+
+    // Update, delete, and overwrite after create are denied
+    const ref = doc(owner, 'users', 'prod-owner', 'journals', prodJournal);
+    await assertFails(updateDoc(ref, { contract_version: 2 }));
+    await assertFails(deleteDoc(ref));
+    await assertFails(setDoc(ref, descriptorDoc('prod-owner')));
+
+    // Cross-UID read, list, and write are denied
+    await assertFails(getDoc(doc(outsider, 'users', 'prod-owner', 'journals', prodJournal)));
+    await assertFails(getDocs(collection(outsider, 'users', 'prod-owner', 'journals')));
+    await assertFails(
+      setDoc(doc(outsider, 'users', 'prod-owner', 'journals', journalB), descriptorDoc('prod-outsider', journalB)),
+    );
+  });
+
+  it('discovers, explicitly joins, and bidirectionally syncs production entries via the emulator while isolating sandbox data', async () => {
+    const uid = 'join-sync-owner';
+    const desktopDb = environment.authenticatedContext(uid).firestore();
+    const phoneDb = environment.authenticatedContext(uid).firestore();
+
+    // 1. Sandbox has a DEMO entry under the same UID
+    const sandboxJournal = await getOrCreateSandboxJournalId(desktopDb, uid);
+    const sandboxTransport = new FirestoreSandboxTransport(desktopDb, uid, sandboxJournal);
+    const phoneSandboxStore = await EpisodeStore.open(crypto.randomUUID());
+
+    // 2. Desktop publishes production descriptor and uploads a real production entry
+    const desktopProdStore = await EpisodeStore.open(crypto.randomUUID());
+    const phoneProdStore = await EpisodeStore.open(crypto.randomUUID());
+    try {
+      const demo = await phoneSandboxStore.create({
+        ...blankEpisode(),
+        activity: 'DEMO: sandbox only',
+        outcome: 'stopped_early',
+      });
+      await syncDisposableEntries(phoneSandboxStore, sandboxJournal, sandboxTransport);
+
+      await desktopProdStore.joinProductionJournal(prodJournal, [], productionProvider(prodJournal));
+      const desktopEntry = await desktopProdStore.create({
+        ...blankEpisode(),
+        activity: 'Real desktop episode',
+        outcome: 'completed_with_difficulty',
+        notes: 'From desktop',
+      });
+      await ensureProductionJournalDescriptor(desktopDb, uid, prodJournal);
+      const desktopProdTransport = new FirestoreSandboxTransport(desktopDb, uid, prodJournal);
+      await syncProductionEntries(desktopProdStore, prodJournal, desktopProdTransport);
+
+      // 3. Phone discovers the production journal and awaits explicit join confirmation
+      const controller = new ProductionSyncController({
+        discoverJournals: (u) => discoverProductionJournals(phoneDb, u),
+        verifyDescriptor: (u, j) => verifyProductionJournalDescriptor(phoneDb, u, j),
+        createMailbox: (u, j) => new FirestoreSandboxTransport(phoneDb, u, j),
+      });
+      await controller.attachStore(phoneProdStore);
+      await controller.inspectAccount({ uid, email: 'owner@example.test' });
+      expect(controller.state).toBe('awaiting-join');
+      expect(controller.selectedJournalId).toBe(prodJournal);
+      expect(await phoneProdStore.list()).toEqual([]);
+
+      // 4. Phone explicitly confirms join and pulls the real desktop entry
+      await controller.confirmJoin();
+      expect(controller.state).toBe('signed-in');
+      expect(controller.statusLabel()).toBe('Up to date');
+      expect(await phoneProdStore.journalId()).toBe(prodJournal);
+      expect((await phoneProdStore.list()).map((r) => r.episode?.activity)).toEqual(['Real desktop episode']);
+
+      // 5. Phone creates a new entry and edits the desktop entry, then syncs back to desktop
+      const phoneEntry = await phoneProdStore.create({
+        ...blankEpisode(),
+        activity: 'Real phone episode',
+        outcome: 'completed_normally',
+      });
+      const currentDesktopOnPhone = (await phoneProdStore.get(desktopEntry.record_id))!;
+      await phoneProdStore.update(
+        { ...currentDesktopOnPhone.episode!, notes: 'Updated on phone' },
+        currentDesktopOnPhone.local_revision,
+      );
+      controller.localChanged();
+      await controller.syncEntries();
+      expect(controller.statusLabel()).toBe('Up to date');
+
+      await syncProductionEntries(desktopProdStore, prodJournal, desktopProdTransport);
+      expect(await desktopProdStore.list()).toHaveLength(2);
+      expect((await desktopProdStore.get(desktopEntry.record_id))?.episode?.notes).toBe('Updated on phone');
+      expect((await desktopProdStore.get(phoneEntry.record_id))?.episode?.activity).toBe('Real phone episode');
+
+      // 6. Sandbox and production remain completely isolated
+      expect((await phoneSandboxStore.list()).map((r) => r.record_id)).toEqual([demo.record_id]);
+      expect(await phoneProdStore.get(demo.record_id)).toBeUndefined();
+    } finally {
+      phoneSandboxStore.close();
+      desktopProdStore.close();
+      phoneProdStore.close();
+    }
   });
 });

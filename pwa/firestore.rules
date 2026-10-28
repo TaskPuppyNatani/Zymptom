@@ -19,6 +19,26 @@ service cloud.firestore {
         && get(identityPath).data.journal_id == journalId;
     }
 
+    function validJournalDescriptor(uid, journalId) {
+      return uuid(journalId)
+        && journalId != '00000000-0000-0000-0000-000000000000'
+        && !ownsSandboxJournal(uid, journalId)
+        && request.resource.data.keys().hasAll([
+          'owner_uid', 'journal_id', 'journal_kind',
+          'contract_version', 'record_schema_version', 'published_at'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'owner_uid', 'journal_id', 'journal_kind',
+          'contract_version', 'record_schema_version', 'published_at'
+        ])
+        && request.resource.data.owner_uid == uid
+        && request.resource.data.journal_id == journalId
+        && request.resource.data.journal_kind == 'production'
+        && request.resource.data.contract_version == 1
+        && request.resource.data.record_schema_version == 1
+        && request.resource.data.published_at == request.time;
+    }
+
     match /users/{uid}/sandbox/identity {
       allow get: if signedInAs(uid);
       allow list: if false;
@@ -28,6 +48,13 @@ service cloud.firestore {
         && request.resource.data.owner_uid == uid
         && uuid(request.resource.data.journal_id)
         && request.resource.data.contract_version == 1;
+      allow update, delete: if false;
+    }
+
+    match /users/{uid}/journals/{journalId} {
+      allow get: if signedInAs(uid) && uuid(journalId);
+      allow list: if signedInAs(uid);
+      allow create: if signedInAs(uid) && validJournalDescriptor(uid, journalId);
       allow update, delete: if false;
     }
 
