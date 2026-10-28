@@ -58,7 +58,9 @@ class RecoveryDialog(QDialog):
         self.choose_button.setFocus()
 
     def choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Choose journal file", "", "Journal files (*.sqlite3 *.sqlite *.db);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose journal file", str(self.session.database.parent), "Journal files (*.sqlite3 *.sqlite *.db);;All files (*)"
+        )
         if not path:
             return
         self.inspect_file(path)

@@ -26,8 +26,10 @@ def test_choose_preview_cancel_recover_refresh_and_restart(qapp, zone, tmp_path,
         window.recovery_action.trigger()
         dialog = window.recovery_dialog
         assert dialog is not None and not dialog.recover_button.isEnabled()
-        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(source), ""))
+        picker_calls = []
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (picker_calls.append(args), (str(source), ""))[1])
         dialog.choose_button.click()
+        assert len(picker_calls) == 1 and picker_calls[0][2] == str(current.database.parent)
         assert "Valid Zymptom journal" in dialog.details.text()
         assert "Entries: 1" in dialog.details.text()
         assert "Journal version: 2" in dialog.details.text()
@@ -58,6 +60,38 @@ def test_choose_preview_cancel_recover_refresh_and_restart(qapp, zone, tmp_path,
             window.recovery_dialog.reject()
         window.close()
         current.close()
+
+
+def test_recovery_picker_uses_active_journal_parent_for_xdg_and_custom_locations(qapp, zone, tmp_path, monkeypatch):
+    xdg_data_home = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data_home))
+    xdg_journal = xdg_data_home / "zymptom" / "journal.sqlite3"
+    custom_journal = tmp_path / "custom" / "nested" / "active.sqlite3"
+    for journal_path in (xdg_journal, custom_journal):
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        session = JournalSession(journal_path)
+        window = MainWindow(session.episodes, zone=zone, backup_session=session)
+        try:
+            window.recovery_action.trigger()
+            dialog = window.recovery_dialog
+            assert dialog is not None
+            assert dialog.preview is None
+            assert dialog.details.text() == "No journal selected."
+            assert not dialog.recover_button.isEnabled()
+            calls = []
+            monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (calls.append(args), ("", ""))[1])
+            dialog.choose_button.click()
+            assert len(calls) == 1
+            assert calls[0][2] == str(journal_path.resolve().parent)
+            assert calls[0][2] != str(journal_path.resolve())
+            assert dialog.preview is None
+            assert dialog.details.text() == "No journal selected."
+            assert not dialog.recover_button.isEnabled()
+        finally:
+            if window.recovery_dialog:
+                window.recovery_dialog.reject()
+            window.close()
+            session.close()
 
 
 def test_invalid_source_and_sandbox_disabled(qapp, zone, tmp_path):
