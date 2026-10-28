@@ -49,7 +49,7 @@ def _decode(document):
 
 
 class FirestoreMailbox:
-    def __init__(self, project_id: str, session: FirebaseSession, *, request=request_json):
+    def __init__(self, project_id: str, session: FirebaseSession, *, request=request_json, journal_id: UUID | str | None = None):
         if not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", project_id) or not re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", session.uid):
             raise TransportError("Invalid sandbox project or account identity.")
         self.session = session
@@ -57,8 +57,18 @@ class FirestoreMailbox:
         self.database = f"projects/{project_id}/databases/(default)"
         self.root = f"{self.database}/documents"
         self.url = f"https://firestore.googleapis.com/v1/{self.root}"
-        self.identity_path = f"users/{session.uid}/sandbox/identity"
-        self.journal_id = None
+        if journal_id is not None:
+            try:
+                parsed = UUID(_uuid(str(journal_id)))
+                if parsed.int == 0:
+                    raise ValueError("Zero UUID")
+            except (ValueError, TypeError, AttributeError):
+                raise TransportError("The production journal identity is malformed.") from None
+            self.identity_path = None
+            self.journal_id = str(parsed)
+        else:
+            self.identity_path = f"users/{session.uid}/sandbox/identity"
+            self.journal_id = None
 
     def _request(self, url, *, body=None):
         headers = {"Authorization": "Bearer " + self.session.valid_token()}
@@ -90,6 +100,9 @@ class FirestoreMailbox:
             raise TransportError("The sandbox journal identity is malformed.") from None
 
     def connect(self):
+        if self.identity_path is None and self.journal_id is not None:
+            self.session.valid_token()
+            return self.journal_id
         try:
             document = self._get(self.identity_path)
             if document is None:

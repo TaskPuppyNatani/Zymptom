@@ -32,8 +32,8 @@ service cloud.firestore {
     }
 
     match /users/{uid}/journals/{journalId}/changes/{changeId} {
-      allow get, list: if ownsSandboxJournal(uid, journalId) && uuid(journalId);
-      allow create: if ownsSandboxJournal(uid, journalId)
+      allow get, list: if signedInAs(uid) && uuid(journalId);
+      allow create: if signedInAs(uid)
         && uuid(journalId)
         && uuid(changeId)
         && request.resource.data.keys().hasAll([

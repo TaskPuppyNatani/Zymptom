@@ -61,13 +61,22 @@ class DesktopConfig:
     google_client_secret: str = field(default="", repr=False)
 
 
+def production_config_path() -> Path:
+    return configuration_path().parent / "firebase.json"
+
+
 def config_path() -> Path:
     return configuration_path().parent / "sandbox-sync" / "firebase.json"
 
 
 def read_config(path: Path | None = None) -> DesktopConfig:
     try:
-        data = json.loads((path or config_path()).read_text(encoding="utf-8"))
+        if path is None:
+            candidate = production_config_path()
+            target = candidate if candidate.is_file() else config_path()
+        else:
+            target = path
+        data = json.loads(target.read_text(encoding="utf-8"))
         required = ("firebase_api_key", "firebase_project_id", "google_client_id")
         if not isinstance(data, dict) or any(not isinstance(data.get(key), str) or not data[key].strip() for key in required):
             raise ValueError()

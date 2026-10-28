@@ -40,6 +40,11 @@ class MainWindow(QMainWindow):
         self.backup_dialog = None
         self.recovery_dialog = None
         self.sync_dialog = None
+        self._sync_auth = None
+        self._sync_config = None
+        self._sync_last_sync = None
+        self._sync_successful = False
+        self._sync_disconnected = False
         self.backup_action = self.menuBar().addMenu("Journal").addAction("Backups / Restore…")
         self.backup_action.setEnabled(backup_session is not None)
         self.backup_action.triggered.connect(self.open_backup_dialog)
@@ -240,7 +245,7 @@ class MainWindow(QMainWindow):
         if self._sync_modal_open():
             self.sync_dialog.raise_()
             return
-        dialog = SyncDialog(self.backup_session, parent=self)
+        dialog = SyncDialog(self.backup_session, zone=self.zone, now=lambda: self.now(), parent=self)
         self.sync_dialog = dialog
         dialog.finished.connect(lambda: setattr(self, "sync_dialog", None))
         dialog.finished.connect(dialog.deleteLater)
@@ -249,6 +254,11 @@ class MainWindow(QMainWindow):
     open_enrollment_dialog = open_sync_dialog
 
     def _restored_backup(self):
+        self._sync_auth = None
+        self._sync_config = None
+        self._sync_last_sync = None
+        self._sync_successful = False
+        self._sync_disconnected = False
         self.refresh()
         self.history.refresh()
 
@@ -259,6 +269,8 @@ class MainWindow(QMainWindow):
             self.recovery_dialog.reject()
         if self._sync_modal_open():
             self.sync_dialog.reject()
+        self._sync_auth = None
+        self._sync_config = None
         super().closeEvent(event)
 
     def refresh(self):
@@ -383,8 +395,10 @@ class MainWindow(QMainWindow):
         editor = EpisodeEditor(self.service, episode, zone=self.zone, now=self.now(), parent=self)
         self.editor = editor
         editor.accepted.connect(self._refresh_views)
+        editor.accepted.connect(lambda: setattr(self, "_sync_successful", False))
         editor.deleted.connect(self.refresh)
         editor.deleted.connect(self.history.refresh)
+        editor.deleted.connect(lambda: setattr(self, "_sync_successful", False))
         editor.finished.connect(self._editor_finished)
         editor.finished.connect(editor.deleteLater)
         editor.open()

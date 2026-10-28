@@ -62,6 +62,25 @@ def enrollment_preview_text(preview):
     ])
 
 
+def first_sync_preview_text(preview):
+    return "\n".join([
+        f"Journal entries: {preview.entry_count}",
+        f"Local changes waiting to upload: {preview.pending_change_count}",
+        "Production journal identity: Established",
+        "Safety backup: A verified safety backup will be created before first sync",
+        "Cloud mailbox safety: Nothing will be deleted locally if the cloud mailbox is empty",
+    ])
+
+
+def production_sync_details_text(preview):
+    return "\n".join([
+        f"Journal entries: {preview.entry_count}",
+        f"Local changes waiting to upload: {preview.pending_change_count}",
+        "Production journal identity: Established",
+        "Safety backup: Verified automatically before applying incoming changes",
+    ])
+
+
 def failure_kind(error):
     """Translate known service errors without exposing their messages to UI."""
     text = str(error).lower()

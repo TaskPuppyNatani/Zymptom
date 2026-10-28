@@ -21,9 +21,17 @@ from zymptom.persistence.database import transaction
 from zymptom.persistence.migrations import apply_migrations
 
 from .episodes import EpisodeService
-from zymptom.sync.contract import SyncError
+from zymptom.sync.contract import SyncBatch, SyncError
 from zymptom.sync.identity import DeviceIdentity, parse_device_id
-from zymptom.sync.storage import read_enrollment, seed_legacy, validate_state
+from zymptom.sync.service import MergeResult, SyncService
+from zymptom.sync.storage import ancestors, frontier, get_head, read_changes, read_enrollment, seed_legacy, validate_state
+
+
+PRODUCTION_PROVIDER_PREFIX = "firebase-production:"
+
+
+def production_provider(journal_id: UUID | str) -> str:
+    return f"{PRODUCTION_PROVIDER_PREFIX}{parse_device_id(journal_id)}"
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,51 @@ class EnrollmentResult:
     already_tracked_count: int
     already_enrolled: bool
     safety_backup: Path | None
+
+
+@dataclass(frozen=True)
+class ProductionSyncPreview:
+    enrolled: bool
+    journal_id: UUID | None
+    provider: str | None
+    entry_count: int
+    total_change_count: int
+    pending_change_count: int
+    acknowledged_change_count: int
+    conflict_count: int
+    first_sync_required: bool
+    safety_backup_required: bool
+
+
+@dataclass(frozen=True)
+class ProductionSyncResult:
+    journal_id: UUID
+    provider: str
+    mailbox_state: str
+    uploaded: tuple[UUID, ...]
+    merge: MergeResult
+    conflicts: int
+    up_to_date: bool
+    safety_backup: Path | None
+
+
+def _classify_mailbox(connection: sqlite3.Connection, batch: SyncBatch, known: dict, combined: dict) -> str:
+    if not batch.changes:
+        return "empty"
+    new_ids = {change.change_id for change in batch.changes if change.change_id not in known}
+    if not new_ids:
+        return "identical"
+    incoming_map = {change.change_id: change for change in batch.changes}
+    for record_id in {change.record_id for change in batch.changes if change.change_id in new_ids}:
+        for candidate in frontier(record_id, incoming_map):
+            if candidate.change_id not in new_ids:
+                continue
+            head = get_head(connection, record_id)
+            if (head is not None
+                    and head.change_id not in ancestors(candidate.change_id, combined)
+                    and candidate.change_id not in ancestors(head.change_id, combined)):
+                return "conflicting"
+    return "compatible"
 
 
 @dataclass(frozen=True)
@@ -194,6 +247,110 @@ class JournalSession:
             already_tracked_count=current.already_tracked_count,
             already_enrolled=current.enrolled,
             safety_backup=safety.path,
+        )
+
+    def inspect_production_sync(self, *, has_synced_before: bool = False) -> ProductionSyncPreview:
+        """Inspect production sync readiness and pending Change counts without network calls or mutations."""
+        enrollment = self.inspect_enrollment()
+        if not enrollment.enrolled or enrollment.journal_id is None or enrollment.bootstrap_required_count > 0:
+            return ProductionSyncPreview(
+                enrolled=False,
+                journal_id=None,
+                provider=None,
+                entry_count=enrollment.entry_count,
+                total_change_count=0,
+                pending_change_count=0,
+                acknowledged_change_count=0,
+                conflict_count=0,
+                first_sync_required=True,
+                safety_backup_required=True,
+            )
+        with self.episodes.repository._read_snapshot():
+            validate_state(self.connection, allow_untracked=False)
+            provider = production_provider(enrollment.journal_id)
+            service = SyncService(self.episodes, before_merge=self.before_destructive_change)
+            changes = read_changes(self.connection)
+            pending = service.pending(provider)
+            acknowledged = len(changes) - len(pending.changes)
+            conflicts = len(service.unresolved_conflicts())
+            first_sync_required = (acknowledged == 0 and not has_synced_before)
+            return ProductionSyncPreview(
+                enrolled=True,
+                journal_id=enrollment.journal_id,
+                provider=provider,
+                entry_count=enrollment.entry_count,
+                total_change_count=len(changes),
+                pending_change_count=len(pending.changes),
+                acknowledged_change_count=acknowledged,
+                conflict_count=conflicts,
+                first_sync_required=first_sync_required,
+                safety_backup_required=True,
+            )
+
+    def sync_production(
+        self,
+        mailbox,
+        *,
+        approve_first_sync: bool = False,
+        has_synced_before: bool = False,
+    ) -> ProductionSyncResult:
+        """Conservatively synchronize the enrolled production journal with its Firebase mailbox."""
+        if self.connection is None:
+            raise SyncError("The current journal is unavailable.")
+        if self.connection.in_transaction:
+            raise SyncError("Finish the active journal transaction before syncing.")
+        preview = self.inspect_production_sync(has_synced_before=has_synced_before)
+        if not preview.enrolled or preview.journal_id is None or preview.provider is None:
+            raise SyncError("Prepare this journal for sync before connecting.")
+        is_first_sync = preview.first_sync_required
+        if is_first_sync and not approve_first_sync:
+            raise SyncError("Confirm the first production sync before uploading this journal.")
+        if getattr(mailbox, "identity_path", None) is not None:
+            raise SyncError("Production sync cannot use the disposable sandbox mailbox.")
+        if getattr(mailbox, "journal_id", None) is None:
+            mailbox.journal_id = str(preview.journal_id)
+        connected = mailbox.connect() if hasattr(mailbox, "connect") else mailbox.journal_id
+        try:
+            connected_id = parse_device_id(connected)
+            mailbox_id = parse_device_id(getattr(mailbox, "journal_id", connected))
+        except (ValueError, TypeError) as exc:
+            raise SyncError("The mailbox journal identity is invalid.") from exc
+        if connected_id != preview.journal_id or mailbox_id != preview.journal_id:
+            raise SyncError("The mailbox journal identity does not match this production journal.")
+        service = SyncService(self.episodes, before_merge=self.before_destructive_change)
+        provider = preview.provider
+        incoming = mailbox.pull()
+        batch = SyncBatch.from_json(incoming.to_json() if isinstance(incoming, SyncBatch) else incoming)
+        with self.episodes.repository._read_snapshot():
+            known, combined = service._check(batch)
+            mailbox_state = _classify_mailbox(self.connection, batch, known, combined)
+        if batch.changes:
+            merge = service.apply(batch, source_provider=provider)
+            safety_backup = merge.safety_backup
+        elif is_first_sync:
+            safety = service._safety_backup()
+            merge = MergeResult(safety_backup=safety.path)
+            safety_backup = safety.path
+        else:
+            merge = MergeResult()
+            safety_backup = None
+        pending = service.pending(provider)
+        uploaded = []
+        for change in pending.changes:
+            mailbox.upload(change)
+            service.acknowledge(provider, [change.change_id])
+            uploaded.append(change.change_id)
+        remaining = service.pending(provider)
+        conflicts = len(service.unresolved_conflicts())
+        return ProductionSyncResult(
+            journal_id=preview.journal_id,
+            provider=provider,
+            mailbox_state=mailbox_state,
+            uploaded=tuple(uploaded),
+            merge=merge,
+            conflicts=conflicts,
+            up_to_date=(not remaining.changes and conflicts == 0),
+            safety_backup=safety_backup,
         )
 
     def prepare_restore(self, path: Path) -> RestorePlan:
@@ -450,3 +607,17 @@ class JournalSession:
             raise BackupError("Restore failed. The previous working journal was recovered; the safety backup is preserved.") from exc
         finally:
             self.cancel_restore()
+
+
+def sync_production(
+    session: JournalSession,
+    mailbox,
+    *,
+    approve_first_sync: bool = False,
+    has_synced_before: bool = False,
+) -> ProductionSyncResult:
+    return session.sync_production(
+        mailbox,
+        approve_first_sync=approve_first_sync,
+        has_synced_before=has_synced_before,
+    )
