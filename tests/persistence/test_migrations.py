@@ -16,6 +16,7 @@ def test_fresh_database_creates_schema_and_records_version(connection):
         "schema_migrations", "episodes", "episode_functional_demands", "episode_symptoms",
         "episode_adaptations", "episode_consequences", "episode_recovery_actions",
         "sync_changes", "sync_heads", "sync_conflicts", "sync_acknowledgements",
+        "sync_enrollment",
     }
     assert schema_version(connection) == MIGRATIONS[-1].version
     history = connection.execute("SELECT version, name, applied_at FROM schema_migrations").fetchall()
@@ -24,6 +25,7 @@ def test_fresh_database_creates_schema_and_records_version(connection):
     assert history[0]["name"] == "create_functional_episodes"
     assert history[0]["applied_at"].endswith("+00:00")
     assert history[1]["version"] == 2 and history[1]["name"] == "sync_contract_v1"
+    assert history[2]["version"] == 3 and history[2]["name"] == "production_sync_enrollment"
 
 
 def test_reopen_skips_applied_migration_and_preserves_data(database_path, full_episode):

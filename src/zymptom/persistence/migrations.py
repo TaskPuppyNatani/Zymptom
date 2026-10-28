@@ -118,7 +118,20 @@ MIGRATION_002 = Migration(
     initialize=_seed_sync,
 )
 
-MIGRATIONS = (MIGRATION_001, MIGRATION_002)
+MIGRATION_003 = Migration(
+    version=3,
+    name="production_sync_enrollment",
+    statements=(
+        """CREATE TABLE sync_enrollment (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            journal_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('local_only')),
+            enrolled_at TEXT NOT NULL
+        )""",
+    ),
+)
+
+MIGRATIONS = (MIGRATION_001, MIGRATION_002, MIGRATION_003)
 
 
 def apply_migrations(

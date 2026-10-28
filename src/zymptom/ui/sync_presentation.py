@@ -24,6 +24,43 @@ MESSAGES = {
     "other": "Sync needs attention. Your local entries remain available.",
 }
 
+ENROLLMENT_MESSAGES = {
+    "backup": "Zymptom could not create a safety backup, so your journal was not changed.",
+    "history": "Zymptom found incomplete sync history and did not change your journal.",
+    "other": "Zymptom could not prepare this journal for sync. Your entries were not changed.",
+}
+
+
+def enrollment_failure_kind(error):
+    text = str(error).lower()
+    if isinstance(error, BackupError) or (isinstance(error, SyncError) and "backup" in text):
+        return "backup"
+    if isinstance(error, SyncError):
+        return "history"
+    return "other"
+
+
+def enrollment_failure_message(error):
+    return ENROLLMENT_MESSAGES[enrollment_failure_kind(error)]
+
+
+def enrollment_preview_text(preview):
+    status_text = "Already prepared (local only)" if preview.enrolled else "Not yet prepared"
+    identity_text = "Assigned" if preview.journal_id is not None else "Will be assigned during setup"
+    backup_text = (
+        "Verified safety backup created before setup"
+        if preview.enrolled and not preview.safety_backup_required
+        else "Required before setup (created automatically)"
+    )
+    return "\n".join([
+        f"Enrollment status: {status_text}",
+        f"Existing journal entries: {preview.entry_count}",
+        f"Entries already carrying sync history: {preview.already_tracked_count}",
+        f"Entries to receive bootstrap history: {preview.bootstrap_required_count}",
+        f"Production journal identity: {identity_text}",
+        f"Safety backup: {backup_text}",
+    ])
+
 
 def failure_kind(error):
     """Translate known service errors without exposing their messages to UI."""

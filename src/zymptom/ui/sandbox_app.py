@@ -139,7 +139,6 @@ class SandboxWindow(MainWindow):
         sync_layout.addLayout(actions)
         sync_layout.addWidget(self.conflict_button)
         sync_layout.addStretch(1)
-        self.settings_menu.addAction("Sync…").triggered.connect(self.open_sync)
         self.signin.clicked.connect(self.begin_signin)
         self.cancel_signin.clicked.connect(self.cancel_auth)
         self.signout.clicked.connect(self.sign_out)
@@ -188,6 +187,12 @@ class SandboxWindow(MainWindow):
 
     def open_recovery_dialog(self):
         self.statusBar().showMessage("Journal recovery is disabled in the disposable sandbox.")
+
+    def open_sync_dialog(self):
+        self.open_sync()
+
+    def open_enrollment_dialog(self):
+        self.statusBar().showMessage("Production sync setup is disabled in the disposable sandbox.")
 
     def _controls(self):
         busy = self.worker is not None

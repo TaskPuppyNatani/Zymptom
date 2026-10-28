@@ -20,6 +20,7 @@ from .branding import application_icon, brand_mark
 from .export_dialog import ExportDialog
 from .backup_dialog import BackupDialog
 from .recovery_dialog import RecoveryDialog
+from .sync_dialog import SyncDialog
 from .labels import OUTCOMES
 from .time import to_local, to_local_datetime
 from .widgets import comfortable
@@ -36,10 +37,14 @@ class MainWindow(QMainWindow):
         self.backup_session = backup_session
         self.backup_dialog = None
         self.recovery_dialog = None
+        self.sync_dialog = None
         self.backup_action = self.menuBar().addMenu("Journal").addAction("Backups / Restore…")
         self.backup_action.setEnabled(backup_session is not None)
         self.backup_action.triggered.connect(self.open_backup_dialog)
         self.settings_menu = self.menuBar().addMenu("Settings")
+        self.sync_action = self.settings_menu.addAction("Sync…")
+        self.sync_action.setEnabled(backup_session is not None)
+        self.sync_action.triggered.connect(self.open_sync_dialog)
         self.recovery_action = self.settings_menu.addMenu("Data").addAction("Import / Recover Journal…")
         self.recovery_action.setEnabled(backup_session is not None)
         self.recovery_action.triggered.connect(self.open_recovery_dialog)
@@ -147,10 +152,17 @@ class MainWindow(QMainWindow):
         except (BackupError, OSError, sqlite3.Error):
             self.statusBar().showMessage("Automatic backup failed. Open Journal → Backups / Restore to retry and check the backup folder.")
 
+    def _sync_modal_open(self) -> bool:
+        return isinstance(self.sync_dialog, SyncDialog)
+
+    @property
+    def enrollment_dialog(self):
+        return self.sync_dialog if isinstance(self.sync_dialog, SyncDialog) else None
+
     def open_backup_dialog(self):
         if self.backup_session is None:
             return
-        if self.editor is not None or self.export_dialog is not None or self.recovery_dialog is not None:
+        if self.editor is not None or self.export_dialog is not None or self.recovery_dialog is not None or self._sync_modal_open():
             self.statusBar().showMessage("Finish or close the current editor or export dialog before managing backups.")
             return
         if self.backup_dialog is not None:
@@ -166,7 +178,7 @@ class MainWindow(QMainWindow):
     def open_recovery_dialog(self):
         if self.backup_session is None or self.backup_session.connection is None:
             return
-        if self.editor is not None or self.export_dialog is not None or self.backup_dialog is not None:
+        if self.editor is not None or self.export_dialog is not None or self.backup_dialog is not None or self._sync_modal_open():
             self.statusBar().showMessage("Close the current editor or dialog before recovering a journal.")
             return
         if self.recovery_dialog is not None:
@@ -179,6 +191,23 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(dialog.deleteLater)
         dialog.open()
 
+    def open_sync_dialog(self):
+        if self.backup_session is None or self.backup_session.connection is None:
+            return
+        if self.editor is not None or self.export_dialog is not None or self.backup_dialog is not None or self.recovery_dialog is not None:
+            self.statusBar().showMessage("Close the current editor or dialog before setting up sync.")
+            return
+        if self._sync_modal_open():
+            self.sync_dialog.raise_()
+            return
+        dialog = SyncDialog(self.backup_session, parent=self)
+        self.sync_dialog = dialog
+        dialog.finished.connect(lambda: setattr(self, "sync_dialog", None))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+
+    open_enrollment_dialog = open_sync_dialog
+
     def _restored_backup(self):
         self.refresh()
         self.history.refresh()
@@ -188,6 +217,8 @@ class MainWindow(QMainWindow):
             self.backup_dialog.reject()
         if self.recovery_dialog is not None:
             self.recovery_dialog.reject()
+        if self._sync_modal_open():
+            self.sync_dialog.reject()
         super().closeEvent(event)
 
     def refresh(self):
@@ -228,7 +259,7 @@ class MainWindow(QMainWindow):
         self.retry_button.show()
 
     def new_episode(self):
-        if self.backup_dialog is not None or self.recovery_dialog is not None:
+        if self.backup_dialog is not None or self.recovery_dialog is not None or self._sync_modal_open():
             return
         self._open_editor()
 
@@ -281,7 +312,7 @@ class MainWindow(QMainWindow):
         self.history.refresh()
 
     def open_export_dialog(self):
-        if self.backup_dialog is not None or self.recovery_dialog is not None:
+        if self.backup_dialog is not None or self.recovery_dialog is not None or self._sync_modal_open():
             return
         if self.backup_session is not None and self.backup_session.connection is None:
             self.statusBar().showMessage("The journal is unavailable. Close Zymptom and use the preserved safety backup.")
@@ -300,7 +331,7 @@ class MainWindow(QMainWindow):
         self.export_dialog = None
 
     def _open_editor(self, episode=None):
-        if self.backup_dialog is not None or self.recovery_dialog is not None:
+        if self.backup_dialog is not None or self.recovery_dialog is not None or self._sync_modal_open():
             return
         if self.backup_session is not None and self.backup_session.connection is None:
             self.statusBar().showMessage("The journal is unavailable. Close Zymptom and use the preserved safety backup.")

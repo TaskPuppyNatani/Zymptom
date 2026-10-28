@@ -3,7 +3,10 @@
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid5
 
+from zymptom.domain.validation import deserialize_timestamp, parse_id
+
 from .contract import Change, SyncError, canonical, legacy_change, parse_json, value_hash
+from .identity import parse_device_id
 
 CONFLICT_NAMESPACE = UUID("99454a4c-5f39-588b-b0ce-d00f477690d4")
 
@@ -66,12 +69,37 @@ def track_local(connection, *, episode, before, record_id: UUID, device_id: UUID
     return change
 
 
-def seed_legacy(connection) -> None:
+def seed_legacy(connection) -> tuple[Change, ...]:
     from zymptom.persistence.repository import EpisodeRepository
+    created = []
     for episode in EpisodeRepository(connection).list():
-        change = legacy_change(episode)
-        insert_change(connection, change)
-        set_head(connection, change)
+        if get_head(connection, episode.id) is None:
+            change = legacy_change(episode)
+            insert_change(connection, change)
+            set_head(connection, change)
+            created.append(change)
+    return tuple(created)
+
+
+def read_enrollment(connection) -> tuple[UUID, str, datetime] | None:
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_enrollment'").fetchone():
+        return None
+    rows = connection.execute("SELECT singleton, journal_id, state, enrolled_at FROM sync_enrollment").fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1 or rows[0][0] != 1 or rows[0][2] != "local_only":
+        raise SyncError("Journal sync enrollment metadata is invalid")
+    if not isinstance(rows[0][1], str) or not isinstance(rows[0][3], str):
+        raise SyncError("Journal sync enrollment metadata is invalid")
+    try:
+        journal_id = parse_device_id(rows[0][1])
+        enrolled_at = deserialize_timestamp(rows[0][3])
+    except (ValueError, TypeError) as exc:
+        raise SyncError("Journal sync enrollment metadata is invalid") from exc
+    if any(isinstance(row[0], str) and row[0].startswith("firebase-sandbox:")
+           for row in connection.execute("SELECT DISTINCT provider FROM sync_acknowledgements")):
+        raise SyncError("Sandbox sync state cannot be enrolled for production sync")
+    return journal_id, rows[0][2], enrolled_at
 
 
 def ancestors(change_id: UUID, changes: dict[UUID, Change]) -> set[UUID]:
@@ -141,15 +169,21 @@ def resolve_covered_conflicts(connection, resolution: Change, changes: dict[UUID
             connection.execute("UPDATE sync_conflicts SET resolution_id = ? WHERE conflict_id = ?", (str(resolution.change_id), row[0]))
 
 
-def validate_state(connection) -> None:
+def validate_state(connection, *, allow_untracked: bool = False) -> None:
     """Backup verification includes revision history, head consistency, and conflicts."""
     from zymptom.persistence.repository import EpisodeRepository
+    enrollment = read_enrollment(connection)
+    if enrollment is not None:
+        allow_untracked = False
     changes = read_changes(connection)
     validate_graph(changes)
     heads = {}
     repository = EpisodeRepository(connection)
     for row in connection.execute("SELECT record_id, change_id FROM sync_heads"):
-        record_id, change_id = UUID(row[0]), UUID(row[1])
+        try:
+            record_id, change_id = parse_id(row[0]), parse_id(row[1])
+        except ValueError as exc:
+            raise SyncError("A sync head is missing or inconsistent") from exc
         head = changes.get(change_id)
         if head is None or head.record_id != record_id or head not in frontier(record_id, changes):
             raise SyncError("A sync head is missing or inconsistent")
@@ -157,24 +191,34 @@ def validate_state(connection) -> None:
         if head.deleted != (episode is None) or head.content_hash != value_hash(record_id, episode):
             raise SyncError("Episode contents and sync head disagree")
         heads[record_id] = head
-    if {episode.id for episode in repository.list()} - heads.keys() or {change.record_id for change in changes.values()} - heads.keys():
+    if {change.record_id for change in changes.values()} - heads.keys():
+        raise SyncError("A record has no sync head")
+    if not allow_untracked and ({episode.id for episode in repository.list()} - heads.keys()):
         raise SyncError("A record has no sync head")
     unresolved = []
     for row in connection.execute("SELECT conflict_id, record_id, local_id, incoming_id, base_id, resolution_id FROM sync_conflicts"):
-        record_id = UUID(row[1])
-        local, incoming = changes[UUID(row[2])], changes[UUID(row[3])]
+        try:
+            conflict_id, record_id = parse_id(row[0]), parse_id(row[1])
+            local_id, incoming_id = parse_id(row[2]), parse_id(row[3])
+            base_id = parse_id(row[4]) if row[4] is not None else None
+            resolution_id = parse_id(row[5]) if row[5] is not None else None
+        except ValueError as exc:
+            raise SyncError("Conflict identity or concurrent candidates are inconsistent") from exc
+        local, incoming = changes.get(local_id), changes.get(incoming_id)
+        if local is None or incoming is None or record_id not in heads:
+            raise SyncError("Conflict candidates are missing from sync history")
         if local.record_id != record_id or incoming.record_id != record_id:
             raise SyncError("Conflict candidates belong to different records")
         left, right = ancestors(local.change_id, changes), ancestors(incoming.change_id, changes)
         pair = sorted((str(local.change_id), str(incoming.change_id)))
-        if UUID(row[0]) != uuid5(CONFLICT_NAMESPACE, canonical(pair)) or local.change_id in right or incoming.change_id in left:
+        if conflict_id != uuid5(CONFLICT_NAMESPACE, canonical(pair)) or local.change_id in right or incoming.change_id in left:
             raise SyncError("Conflict identity or concurrent candidates are inconsistent")
         common = left & right
-        if row[4] is not None and UUID(row[4]) not in common:
+        if base_id is not None and base_id not in common:
             raise SyncError("Conflict base is not a common ancestor")
-        if row[5] is not None:
-            resolution = changes[UUID(row[5])]
-            if resolution.operation != "resolve" or not {local.change_id, incoming.change_id} <= ancestors(resolution.change_id, changes):
+        if resolution_id is not None:
+            resolution = changes.get(resolution_id)
+            if resolution is None or resolution.operation != "resolve" or not {local.change_id, incoming.change_id} <= ancestors(resolution.change_id, changes):
                 raise SyncError("Conflict resolution does not preserve both candidates")
         else:
             if {local.change_id, incoming.change_id} <= ancestors(heads[record_id].change_id, changes):
@@ -190,5 +234,9 @@ def validate_state(connection) -> None:
                        for left, right in unresolved):
                 raise SyncError("A concurrent candidate has no explicit unresolved conflict")
     for row in connection.execute("SELECT provider, change_id FROM sync_acknowledgements"):
-        if not isinstance(row[0], str) or not row[0].strip() or len(row[0]) > 128 or UUID(row[1]) not in changes:
+        try:
+            acknowledged_id = parse_id(row[1])
+        except ValueError as exc:
+            raise SyncError("A provider acknowledgement is invalid") from exc
+        if not isinstance(row[0], str) or not row[0].strip() or len(row[0]) > 128 or acknowledged_id not in changes:
             raise SyncError("A provider acknowledgement is invalid")

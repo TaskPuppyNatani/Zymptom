@@ -6,18 +6,53 @@ import sqlite3
 import os
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID, uuid4
 
+from zymptom.domain.validation import serialize_timestamp
 from zymptom.persistence import EpisodeRepository, connect_database
 from zymptom.persistence.backups import (
     BackupError, BackupInfo, BackupStore, content_hash, copy_sqlite, file_checksum,
-    readonly, validate_connection, validate_snapshot,
+    readonly, transaction_content_hash, validate_connection, validate_snapshot,
 )
+from zymptom.persistence.database import transaction
 from zymptom.persistence.migrations import apply_migrations
 
 from .episodes import EpisodeService
+from zymptom.sync.contract import SyncError
 from zymptom.sync.identity import DeviceIdentity, parse_device_id
+from zymptom.sync.storage import read_enrollment, seed_legacy, validate_state
+
+
+@dataclass(frozen=True)
+class EnrollmentPreview:
+    enrolled: bool
+    journal_id: UUID | None
+    enrolled_at: datetime | None
+    entry_count: int
+    already_tracked_count: int
+    bootstrap_required_count: int
+    safety_backup_required: bool
+
+    @property
+    def already_enrolled(self) -> bool:
+        return self.enrolled
+
+    @property
+    def state(self) -> str:
+        return "local_only" if self.enrolled else "not_enrolled"
+
+
+@dataclass(frozen=True)
+class EnrollmentResult:
+    journal_id: UUID
+    enrolled_at: datetime
+    entry_count: int
+    bootstrapped_count: int
+    already_tracked_count: int
+    already_enrolled: bool
+    safety_backup: Path | None
 
 
 @dataclass(frozen=True)
@@ -68,6 +103,91 @@ class JournalSession:
         if self.connection is None:
             raise BackupError("The journal is unavailable. Close Zymptom before trying again.")
         return self.backups.create(self.connection, "safety")
+
+    @property
+    def journal_id(self) -> UUID | None:
+        return self.inspect_enrollment().journal_id
+
+    def inspect_enrollment(self) -> EnrollmentPreview:
+        """Inspect local Z5 enrollment state and bootstrap needs without mutating the journal."""
+        if self.connection is None:
+            raise SyncError("The current journal is unavailable.")
+        if (self.database.parent / ".sandbox-owner.json").exists() or self.database.parent.name == "sandbox-sync":
+            raise SyncError("Sandbox journals cannot be enrolled for production sync.")
+        with self.episodes.repository._read_snapshot():
+            if any(isinstance(row[0], str) and row[0].startswith("firebase-sandbox:")
+                   for row in self.connection.execute("SELECT DISTINCT provider FROM sync_acknowledgements")):
+                raise SyncError("Sandbox sync state cannot be enrolled for production sync.")
+            validate_state(self.connection, allow_untracked=True)
+            enrollment = read_enrollment(self.connection)
+            episodes = self.episodes.repository.list()
+            heads = {UUID(row[0]) for row in self.connection.execute("SELECT record_id FROM sync_heads")}
+            already_tracked = sum(1 for episode in episodes if episode.id in heads)
+            bootstrap_required = len(episodes) - already_tracked
+            return EnrollmentPreview(
+                enrolled=enrollment is not None,
+                journal_id=enrollment[0] if enrollment is not None else None,
+                enrolled_at=enrollment[2] if enrollment is not None else None,
+                entry_count=len(episodes),
+                already_tracked_count=already_tracked,
+                bootstrap_required_count=bootstrap_required,
+                safety_backup_required=not (enrollment is not None and bootstrap_required == 0),
+            )
+
+    def enroll_sync(self, *, now: datetime | None = None) -> EnrollmentResult:
+        """Create a verified safety backup and atomically enroll the production journal for local Z5 sync."""
+        if self.connection is None:
+            raise SyncError("The current journal is unavailable.")
+        if self.connection.in_transaction:
+            raise SyncError("Finish the active journal transaction before enrolling sync.")
+        preview = self.inspect_enrollment()
+        if preview.enrolled and preview.bootstrap_required_count == 0:
+            return EnrollmentResult(
+                journal_id=preview.journal_id,
+                enrolled_at=preview.enrolled_at,
+                entry_count=preview.entry_count,
+                bootstrapped_count=0,
+                already_tracked_count=preview.already_tracked_count,
+                already_enrolled=True,
+                safety_backup=None,
+            )
+        timestamp = now if now is not None else datetime.now(UTC)
+        if timestamp.utcoffset() is None:
+            raise ValueError("Enrollment time must have a timezone")
+        timestamp = timestamp.astimezone(UTC)
+        safety = self.before_destructive_change()
+        if not isinstance(safety, BackupInfo) or not safety.valid or file_checksum(safety.path) != safety.checksum:
+            raise BackupError("A verified pre-enrollment safety backup is required.")
+        _, snapshot_hash = validate_snapshot(safety.path)
+        if snapshot_hash != safety.content_hash or snapshot_hash != content_hash(self.connection):
+            raise BackupError("The safety backup does not match the current journal.")
+        with transaction(self.connection):
+            if transaction_content_hash(self.connection) != safety.content_hash:
+                raise SyncError("The journal changed after its safety backup. Retry sync setup.")
+            current = self.inspect_enrollment()
+            created = seed_legacy(self.connection)
+            if current.enrolled:
+                journal_id = current.journal_id
+                enrolled_at = current.enrolled_at
+            else:
+                journal_id = uuid4()
+                while journal_id.int == 0 or journal_id == self._device_id:
+                    journal_id = uuid4()
+                enrolled_at = timestamp
+                self.connection.execute(
+                    "INSERT INTO sync_enrollment (singleton, journal_id, state, enrolled_at) VALUES (1, ?, 'local_only', ?)",
+                    (str(journal_id), serialize_timestamp(enrolled_at)),
+                )
+            validate_state(self.connection, allow_untracked=False)
+        return EnrollmentResult(
+            journal_id=journal_id,
+            enrolled_at=enrolled_at,
+            entry_count=current.entry_count,
+            bootstrapped_count=len(created),
+            already_tracked_count=current.already_tracked_count,
+            already_enrolled=current.enrolled,
+            safety_backup=safety.path,
+        )
 
     def prepare_restore(self, path: Path) -> RestorePlan:
         if self.connection is None:

@@ -30,7 +30,7 @@ def test_schema_one_upgrade_backfills_deterministic_roots_without_touching_recor
         path = tmp_path / name
         legacy_database(path, original)
         with closing(connect_database(path)) as connection:
-            assert schema_version(connection) == 2
+            assert schema_version(connection) == 3
             assert EpisodeRepository(connection).list() == [original]
             head = get_head(connection, original.id)
             assert head.revision == 1 and head.device_id.int == 0 and head.episode == original

@@ -32,7 +32,7 @@ def test_choose_preview_cancel_recover_refresh_and_restart(qapp, zone, tmp_path,
         assert len(picker_calls) == 1 and picker_calls[0][2] == str(current.database.parent)
         assert "Valid Zymptom journal" in dialog.details.text()
         assert "Entries: 1" in dialog.details.text()
-        assert "Journal version: 2" in dialog.details.text()
+        assert "Journal version: 3" in dialog.details.text()
         assert "No upgrade required" in dialog.details.text()
         assert dialog.recover_button.isEnabled()
         backups_before = len(current.backups.list())

@@ -42,7 +42,7 @@ def test_inspection_preserves_source_and_reports_preview(journal, tmp_path, full
     preview = journal.inspect_recovery(path)
     assert preview.entry_count == 1
     assert preview.oldest == preview.newest == full_episode.occurred_at
-    assert preview.schema_version == (1 if older else 2)
+    assert preview.schema_version == (1 if older else 3)
     assert preview.migration_required is older
     assert file_checksum(path) == before
     assert sorted(item.name for item in tmp_path.iterdir() if item.name.startswith("external")) == ["external.sqlite3"]
@@ -76,7 +76,7 @@ def test_invalid_sources_are_rejected_without_changing_current(journal, tmp_path
                 conn.execute("CREATE TABLE episode_symptoms (episode_id TEXT NOT NULL, position INTEGER NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (episode_id, position))")
     if kind in {"forged_schema", "extra_schema"}:
         with closing(journal._readonly_recovery(path)) as connection:
-            assert validate_connection(connection)[0] == 2
+            assert validate_connection(connection)[0] == 3
     checksum = file_checksum(path)
     with pytest.raises(RecoveryError) as caught:
         journal.inspect_recovery(path)
@@ -146,10 +146,10 @@ def test_recovery_backups_before_activation_migrates_copy_and_reopens(journal, t
         for field in ("functional_demands", "symptoms", "adaptations", "consequences", "recovery_actions"):
             setattr(expected, field, list(dict.fromkeys(getattr(expected, field))))
     assert journal.episodes.list() == [expected]
-    assert schema_version(journal.connection) == 2
+    assert schema_version(journal.connection) == 3
     assert file_checksum(path) == before
     with closing(sqlite3.connect(path)) as original:
-        assert schema_version(original) == (1 if older else 2)
+        assert schema_version(original) == (1 if older else 3)
 
 
 def test_changed_source_backup_failure_and_migration_failure_leave_current_untouched(journal, tmp_path, full_episode, monkeypatch):

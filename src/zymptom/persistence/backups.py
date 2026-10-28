@@ -106,7 +106,7 @@ def validate_connection(connection: sqlite3.Connection) -> tuple[int, str]:
         EpisodeRepository(connection).list()
         if history[-1][0] >= 2:
             from zymptom.sync.storage import validate_state
-            validate_state(connection)
+            validate_state(connection, allow_untracked=True)
         return history[-1][0], content_hash(connection)
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
         raise BackupError("The snapshot is unreadable or is not a valid Zymptom journal.") from exc
